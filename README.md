@@ -4,7 +4,7 @@ This is the repository where we state all the information to reproduce the resul
 ## Download the Excel file
 First, the dataset in Excel format must be downloaded. It has all the required data to conduct the posterior analyses presented in the R code file. For a better understanding of the data, here we explain the variables meaning.
 
-## Variable explanation
+## Variables' explanation
   + `studyID` is the included studies in this meta-analysis. Each row (i.e., observation) corresponds to each study-arm.
   + `N` is the total sample of the study.
   + `age` is the average age of each study.
