@@ -1,10 +1,17 @@
-# Physical-activity-and-Type-2-Diabetes-
-This is the repository where we state all the information to reproduce the results of our manuscript entitled "Optimal Dose and Type of Physical Activity to Improve Glycemic Control in People Diagnosed With Type 2 Diabetes: A Systematic Review and Meta-Analysis" published in Diabetes Care.
+# **Physical Activity and Type 2 Diabetes Mellitus**
+Data from the World Health Organization shows that the number of people with type 2 diabetes mellitus (T2DM) skyrocketed from 108 million in 1980 to 422 million in 2014. Not surprinsingly considering our current lifestyle, the prevalence has been sharply rising: there was a **3%** increase in diabetes **mortality rates** by age between 2000 and 2019. Diabetes is a major cause of blindness, kidney failure, heart attacks, stroke, and lower limb amputation. Thus, it is considered one of the greatest public health concerns of the 21th century.  
 
-## Download the Excel file
+**Physical activity** has been demonstrated as a critical part of the treatment of this chronic condition. However, there is no consistent evidence about which and how much physical activity these people should engage to improve their global health. Therefore, this repository tries to clarify this information, providing the required data to reproduce the results presented in the scientific works that arose from this research question. We firstly focused on one of the most interesting outcomes in diabetes: the **glycosylated hemoglobin** (HbA1c). Next, we explored the effectiveness of physical activity in a health condition that is strongly associated with T2DM: **hypertension**.
+
+## Glycosylated hemoglobin
+In this repository you will find the `Glycosylated Hemoglobin (HbA1c)` folder that contains all the documentation needed to reproduce the results of the manuscript entitled **Optimal Dose and Type of Physical Activity to Improve Glycemic Control in People Diagnosed With Type 2 Diabetes: A Systematic Review and Meta-Analysis** published in Diabetes Care (link: https://diabetesjournals.org/care/article/47/2/295/154149/Optimal-Dose-and-Type-of-Physical-Activity-to).  
+
+For a better understanding of the dataset that you have to import in R (read the intructions below), we state a short description of the variables you will find within the dataset. 
+
+### Download the Excel file
 First, the dataset in Excel format must be downloaded. It has all the required data to conduct the posterior analyses presented in the R code file. For a better understanding of the data, here we explain the variables meaning.
 
-## Variables' explanation
+### Variables' explanation
   + `studyID` is the included studies in this meta-analysis. Each row (i.e., observation) corresponds to each study-arm.
   + `N` is the total sample of the study.
   + `age` is the average age of each study.
@@ -39,5 +46,10 @@ First, the dataset in Excel format must be downloaded. It has all the required d
   + `dose_by_50` is the approximation of weekly dose by 50 METs-min/week increments (that is to favour the data exploratory analysis).
   + `dose_by_100` is the approximation of weekly dose by 100 METs-min/week increments.
 
-### File path inspection
+#### File path inspection
 Friendly reminder: you have to fill the gap of the file path within the code when the dataset is imported in our R environment.
+
+
+## Hypertension
+Additionally, you will also find in this repository the `Hypertension` folder, which contains the documentation needed to reproduce the analyses conducted in *title of the manuscript that is not finished yet*. To ease the data import, we export directly the clean dataset from our R environment, and save it in a `.Rda` doc, which can be directly read in R. So, you just have to download the `SBP_data` and `DBP_data` from the aforementioned repository, and run the code in your console.
+
