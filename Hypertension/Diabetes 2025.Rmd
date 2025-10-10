@@ -1,0 +1,2636 @@
+---
+title: "Effectiveness of physical activity in the blood pressure of people with Type II Diabetes Mellitus"
+author: "Álvarez Barbosa-Francisco."
+date: '2025-06-20'
+output: html_document
+---
+
+Load the required libraries
+
+```{r, message=FALSE, warning=FALSE, results='hide'}
+library(tidyverse)
+library(readxl)
+library(ggthemes)
+library(tidybayes)
+library(brms)
+library(marginaleffects)
+library(ggsci)
+library(multinma)
+options(mc.cores = parallel::detectCores())
+library(splines)
+library(cowplot)
+library(patchwork)
+library(ggplot2)
+library(gridExtra)
+library(dplyr)
+library(purrr)
+
+```
+
+ ### Import the dataset
+
+```{r}
+data <- read_xlsx(path = "/Users/pacoalvarez/Desktop/Diabetes/bpd_consensus.xlsx",
+                  col_names = TRUE, na = "")
+```
+
+We can observe that there are two main outcomes in this analysis: `Systolic blood pressure` and `Diastolic blood pressure`. Both outcomes are going to be meta-analysed separetely. Thus, we are going to create two different subsets corresponding to both outcomes.
+
+```{r}
+# Systolic blood pressure subset
+sys.data <- data %>%
+  filter(outcome == "Systolic blood pressure")
+
+# Diastolic blood pressure subset
+dias.data <- data %>%
+  filter(outcome == "Diastolic blood pressure")
+```
+
+#### Data inspection and wrangling
+
+Observing the names of the different physical activity modalities (integrated in the `trt` column), we caught that we have to make a bit of data processing.
+
+```{r}
+# see all the physical activity modalities
+unique(data$trt)
+
+# data processing: modification in the general dataset and consequent subsetting
+data <- data %>%
+  mutate(trt = ifelse(trt == "mixed aerobic exercises", "Mixed aerobic exercises", trt)) %>%
+  mutate(trt = ifelse(trt == "Resistance exercises", "Resistance", trt)) %>%
+  mutate(trt = ifelse(trt == "Aerobic + Resistance exercises", "Aerobic + Resistance", trt)) %>%
+  mutate(trt = ifelse(trt == "Mind-body training", "Mind-body", trt))
+
+# Systolic blood pressure subset
+sys.data <- data %>%
+  filter(outcome == "Systolic blood pressure")
+
+# Diastolic blood pressure subset
+dias.data <- data %>%
+  filter(outcome == "Diastolic blood pressure")
+```
+
+After that, trying conducting some models, we have realised that it is required convert the baseline level of blood pressure to numeric.
+
+```{r}
+# Systolic blood pressure
+sys.data <- sys.data %>%
+  mutate(premean = ifelse(premean == "126,7", "126.7", premean)) %>%
+  mutate(premean = ifelse(premean == "126,9", "126.9", premean)) %>%
+  mutate(premean = as.numeric(premean))
+
+# removing WBV study from the quantitative synthesis, and recoding interventions to ease model convergence 
+sys.data <- sys.data %>%
+  mutate(trt = ifelse(trt == "Aerobic + Resistance + Balance exercises", "Aerobic + Resistance", trt)) %>% 
+  filter(!studyID == "Dominguez-Muñoz, 2020")
+
+# Diastolic blood pressure
+dias.data <- dias.data %>%
+  mutate(premean = ifelse(premean == "71,1", "71.1", premean)) %>%
+  mutate(premean = ifelse(premean == "72,4", "72.4", premean)) %>%
+  mutate(premean = as.numeric(premean))
+
+# Recoding stretching by flexibility
+dias.data <- dias.data %>%
+  mutate(trt = ifelse(trt == "Stretching", "Flexibility", trt))
+```
+
+Neat. Let's move to our first exploratory analyses.
+
+## Systolic blood pressure
+
+First, we are going to conduct an Exploratory Data Analysis aimed to detect potential patterns in the dose-response relationship. In this way, we will be able to decide the best function to model it. Moreover, it is also recommended to observe the distribution of our outcome of interest to ensure that it follows a normal likelihood with posterior meta-analytic purposes.
+
+```{r, warning=FALSE, message=FALSE}
+# Distribution of the change from baseline for usual care
+sys.data %>%
+  filter(trt == "Usual care") %>%
+  ggplot(aes(x = y)) +
+  stat_halfeye() +
+  labs(title = "Distribution of systolic blood pressure responses for usual care",
+       x = "Change from baseline (mmHg)",
+       y = "Density") +
+  theme_minimal()
+
+# Distribution of the change from baseline for physical activity
+sys.data %>%
+  filter(trt != "Usual care") %>%
+  ggplot(aes(x = y)) +
+  stat_halfeye() +
+  labs(title = "Distribution of systolic blood pressure responses for physical activity",
+       x = "Change from baseline (mmHg)",
+       y = "Density") +
+  theme_minimal()
+```
+
+Both responses could be considered normally distributed.
+
+## Diastolic blood pressure
+
+First, we are going to conduct an Exploratory Data Analysis aimed to detect potential patterns in the dose-response relationship. In this way, we will be able to decide the best function to model it. Moreover, it is also recommended to observe the distribution of our outcome of interest to ensure that it follows a normal likelihood with posterior meta-analytic purposes.
+
+```{r, warning=FALSE, message=FALSE}
+# Distribution of the change from baseline for usual care
+dias.data %>%
+  filter(trt == "Usual care") %>%
+  ggplot(aes(x = y)) +
+  stat_halfeye() +
+  labs(title = "Distribution of dyastolic blood pressure responses for usual care",
+       x = "Change from baseline (mmHg)",
+       y = "Density") +
+  theme_minimal()
+
+# Distribution of the change from baseline for physical activity
+dias.data %>%
+  filter(trt != "Usual care") %>%
+  ggplot(aes(x = y)) +
+  stat_halfeye() +
+  labs(title = "Distribution of dyastolic blood pressure responses for physical activity",
+       x = "Change from baseline (mmHg)",
+       y = "Density") +
+  theme_minimal()
+```
+
+Both responses could be considered normally distributed.
+
+Let's plot the applied dose of physical activity (i.e., weekly energy expenditure) and the changr from baseline to observe potential dose-response relationship forms.
+
+```{r}
+if (!all(c("weekly_dose", "y") %in% names(dias.data))) {
+  stop("❌ La tabla `sys.data` no tiene las columnas necesarias: 'weekly_dose' y 'y'")
+}
+
+library(ggplot2)
+library(splines)
+
+lin.plot <- ggplot(dias.data, aes(x = weekly_dose, y = y)) +
+  geom_hline(yintercept = 0, col = "red") +
+  geom_point() +
+  geom_smooth(method = "lm", col = "blue") +
+  labs(
+    x = "Physical Activity Dose (METs-min/week)",
+    y = "Change from baseline (mmHg)",
+    title = "Linear regression method"
+  ) +
+  scale_y_continuous(breaks = seq(-20, 10, 5)) +
+  theme_minimal()
+
+l.plot <- ggplot(dias.data, aes(x = weekly_dose, y = y)) +
+  geom_hline(yintercept = 0, col = "red") +
+  geom_point() +
+  geom_smooth(method = "loess", col = "gold") +
+  labs(
+    x = "Physical Activity Dose (METs-min/week)",
+    y = "Change from baseline (mmHg)",
+    title = "LOESS method"
+  ) +
+  scale_y_continuous(breaks = seq(-20, 10, 5)) +
+  theme_minimal()
+
+n2.plot <- ggplot(dias.data, aes(x = weekly_dose, y = y)) +
+  geom_hline(yintercept = 0, col = "red") +
+  geom_point() +
+  geom_smooth(method = "lm", formula = y ~ ns(x, 2), col = "red") +
+  labs(
+    x = "Physical Activity Dose (METs-min/week)",
+    y = "Change from baseline (mmHg)",
+    title = "Natural spline (2 knots)"
+  ) +
+  scale_y_continuous(breaks = seq(-20, 10, 5)) +
+  theme_minimal()
+
+n3.plot <- ggplot(dias.data, aes(x = weekly_dose, y = y)) +
+  geom_hline(yintercept = 0, col = "red") +
+  geom_point() +
+  geom_smooth(method = "lm", formula = y ~ ns(x, 3), col = "black") +
+  labs(
+    x = "Physical Activity Dose (METs-min/week)",
+    y = "Change from baseline (mmHg)",
+    title = "Natural spline (3 knots)"
+  ) +
+  scale_y_continuous(breaks = seq(-20, 10, 5)) +
+  theme_minimal()
+
+library(gridExtra)
+grid.arrange(lin.plot, l.plot, n2.plot, n3.plot, nrow = 2)
+
+```
+
+## Network Meta-Analysis
+
+At this point, we are going to conduct non-adjusted (not adding covariates) and adjusted (adding covariates) fixed-effect and random-effects network meta-analysis (NMA) models to summarise the effectiveness of different modalities of physical activity *vs.* the usual care these participants received. Next, we will compute the **posterior predictive distributions** for effectiveness in a new study, whose range of harmful effects is wider than the mean effect of our meta-analysis. In this way, we will determine which type of physical activity is less likely to present harmful effects in future studies, and consider a trade-off between effectiveness and safety to recommend a specific modality in this population.
+
+#### Setting a new classification of treatments
+
+We are going to recode the treatments to obtain different classes as indicated in the American College of Sports Medicine.
+
+```{r}
+sys.data <- sys.data %>%
+  mutate(trt.2 = case_when(
+    trt %in% c("HIIT", "Mixed aerobic exercises", "Cycling", "Running", "Walking") ~ "Aerobic",
+    trt == "Mind-body" ~ "Mind-body",
+    trt == "Stretching" ~ "Flexibility",
+    trt %in% c("Aerobic + Resistance",
+               "Aerobic + Resistance + Balance exercises") ~ "Multicomponent",
+    trt == "Usual care" ~ "Usual care",
+    trt == "Resistance" ~ "Resistance"
+  ))
+
+dias.data <- dias.data %>%
+  mutate(trt.2 = case_when(
+    trt %in% c("HIIT", "Mixed aerobic exercises", "Cycling", "Running", "Walking") ~ "Aerobic",
+    trt == "Mind-body" ~ "Mind-body",
+    trt == "Flexibility" ~ "Flexibility",
+    trt %in% c("Aerobic + Resistance",
+               "Aerobic + Resistance + Balance exercises") ~ "Multicomponent",
+    trt == "Usual care" ~ "Usual care",
+    trt == "Resistance" ~ "Resistance"
+  ))
+
+unique(sys.data$trt.2)
+unique(dias.data$trt.2)
+```
+
+### Setting up the network for systolic blood pressure
+
+We have data on the mean changes from baseline (`y`), associated standard errors (`se`), and sample size for each study-arm (`sample_size`). Therefore, we are using **arm-based** data (sometimes called an *exact* likelihhod), which is preferred where possible in general (more than contrast-based data).
+
+```{r}
+# setting up the network_treatment agent
+library(ggpubr)
+net1 <- set_agd_arm(sys.data,
+                   study = studyID,
+                   trt = trt.2,
+                   y = y,
+                   se = se,
+                   sample_size = postn,
+                   trt_ref = "Usual care")
+
+# what?
+net1
+
+# setting up the network_treatment level 3
+net2 <- set_agd_arm(sys.data,
+                   study = studyID,
+                   trt = trt,
+                   y = y,
+                   se = se,
+                   sample_size = postn,
+                   trt_ref = "Usual care")
+
+# what?
+net2
+```
+
+In the summary of our network we observe that we have a total of 60 studies, and 10 treatments (or types of physical activity). Also, information about the type of outcome is indicated (continuous), the reference treatment (`Usual care`), and that our network fullfils with one of the core principles of NMAs, that is the connectivity of the network. Let's see our network.
+
+### Setting up the network for diastolic blood pressure
+
+We have data on the mean changes from baseline (`y`), associated standard errors (`se`), and sample size for each study-arm (`sample_size`). Therefore, we are using **arm-based** data (sometimes called an *exact* likelihhod), which is preferred where possible in general (more than contrast-based data).
+
+```{r}
+# setting up the network_treatment agent
+library(ggpubr)
+net3 <- set_agd_arm(dias.data,
+                   study = studyID,
+                   trt = trt.2,
+                   y = y,
+                   se = se,
+                   sample_size = postn,
+                   trt_ref = "Usual care")
+
+# what?
+net3
+
+# setting up the network_treatment level 3
+net4 <- set_agd_arm(dias.data,
+                   study = studyID,
+                   trt = trt,
+                   y = y,
+                   se = se,
+                   sample_size = postn,
+                   trt_ref = "Usual care")
+
+# what?
+net4
+```
+
+In the summary of our network we observe that we have a total of 61 studies, and 11 treatments (or types of physical activity). Also, information about the type of outcome is indicated (continuous), the reference treatment (`Usual care`), and that our network fullfils with one of the core principles of NMAs, that is the connectivity of the network. Let's see our network.
+
+### Net Plot_systolic and diastolic blood pressure
+
+```{r, echo = FALSE, fig.height=8, fig.width=8, fig.cap="Figure 1. Network plot. The width of the bridges indicates the number of studies that directly compared the two linked treatments. The size of the node refers the total sample size represented in each treatment"}
+
+plot(net1, weight_edges = TRUE, weight_nodes = TRUE) +
+  theme(legend.position = "bottom",
+        legend.box = "vertical")
+
+plot(net2, weight_edges = TRUE, weight_nodes = TRUE) +
+  theme(legend.position = "bottom",
+        legend.box = "vertical")
+
+plot(net3, weight_edges = TRUE, weight_nodes = TRUE) +
+  theme(legend.position = "bottom",
+        legend.box = "vertical")
+
+
+plot(net4, weight_edges = TRUE, weight_nodes = TRUE) +
+  theme(legend.position = "bottom",
+        legend.box = "vertical")
+
+
+
+agent.sys <- plot(net1, weight_edges = TRUE, weight_nodes = TRUE) +
+  theme(legend.position = "bottom",
+        legend.box = "vertical")
+
+trt.sys <- plot(net2, weight_edges = TRUE, weight_nodes = TRUE) +
+  theme(legend.position = "bottom",
+        legend.box = "vertical")
+
+agent.dias <- plot(net3, weight_edges = TRUE, weight_nodes = TRUE) +
+  theme(legend.position = "bottom",
+        legend.box = "vertical")
+
+trt.dias <- plot(net4, weight_edges = TRUE, weight_nodes = TRUE) +
+  theme(legend.position = "bottom",
+        legend.box = "vertical")
+
+
+sys.nets <- ggarrange(agent.sys, trt.sys, labels = c("A",
+                                         "B"),
+          ncol = 1) %>%
+  annotate_figure(., top = "Systolic blood pressure")
+
+
+dias.nets <- ggarrange(agent.dias, trt.dias, labels = c("C",
+                                         "D"),
+          ncol = 1) %>%
+  annotate_figure(., top = "Diastolic blood pressure")
+
+
+
+tiff("diabetes_nets_.tiff", height = 10, width = 13, res = 300, units = "in")
+ggarrange(sys.nets, dias.nets)
+dev.off()
+```
+
+### Meta-analysis models_systolic_agent
+
+We will fit fixed-effect and random-effects models, firstly without any covariates, and then with a meta-regression on the continuous covariate `premean`, which is the baseline systolic blood pressure.
+
+#### Fixed-effect meta-analysis (no covariate)
+
+We start by fitting a standard fixed-effect (FE) model without any covariates. We used informative normal prior distributions for the treatments' effects, and study-specific intercepts. We can examine the range of parameter values implied by these prior distributions.
+
+```{r}
+summary(normal(scale = 10))
+```
+
+Before the optimal prior information selection, we compared the model fit and associated errors of the mean treatment effects between a model with non-information priors (`normal(scale = 100))`), and the one above, and the last one best fitted our estimates. Let's conduct the model.
+
+```{r}
+fit_FE <- nma(net1,
+              seed = 26012024,
+              trt_effects = "fixed",
+              prior_intercept = normal(scale = 10),
+              prior_trt = normal(scale = 10))
+```
+
+Basic parameter summaries are given below.
+
+```{r, collapse=TRUE}
+fit_FE
+```
+
+#### Random-effects model (no covariate)
+
+In this model, we used a half-normal prior distribution for the heterogeneity standard deviation $\tau$.
+
+```{r}
+summary(half_normal(scale = 5))
+```
+
+Let's conduct the model.
+
+```{r}
+fit_RE <- nma(net1,
+              seed = 17012024,
+              trt_effects = "random",
+              prior_intercept = normal(scale = 10),
+              prior_trt = normal(scale = 10),
+              prior_het = half_normal(scale = 5))
+```
+
+### Fixed-effect meta-analysis with covariate `premean`
+
+We conducted a FE meta-regression model. The regression formula `~.trt:premean` means that the interaction of baseline blood pressure with treatent will be included. We increase `adapt_delta` to 0.99 to remove a small number of divergent transition errors.
+
+```{r}
+fit_FE_reg_agent_sys <- nma(net1,
+              seed = 17012024,
+              trt_effects = "fixed",
+              regression = ~.trt:premean,
+              prior_intercept = normal(scale = 10),
+              prior_trt = normal(scale = 10),
+              prior_reg = normal(scale = 100),
+              adapt_delta = 0.99)
+
+fit_FE_reg_agent_sys
+
+```
+
+```{r}
+fit_FE_reg_trt_sys <- nma(net2,
+              seed = 17012024,
+              trt_effects = "fixed",
+              regression = ~.trt:premean,
+              prior_intercept = normal(scale = 10),
+              prior_trt = normal(scale = 10),
+              prior_reg = normal(scale = 100),
+              adapt_delta = 0.99)
+
+fit_FE_reg_trt_sys
+```
+
+```{r}
+fit_FE_reg_agent_dias <- nma(net3,
+              seed = 17012024,
+              trt_effects = "fixed",
+              regression = ~.trt:premean,
+              prior_intercept = normal(scale = 10),
+              prior_trt = normal(scale = 10),
+              prior_reg = normal(scale = 100),
+              adapt_delta = 0.99)
+```
+
+```{r}
+fit_FE_reg_trt_dias <- nma(net4,
+              seed = 17012024,
+              trt_effects = "fixed",
+              regression = ~.trt:premean,
+              prior_intercept = normal(scale = 10),
+              prior_trt = normal(scale = 10),
+              prior_reg = normal(scale = 100),
+              adapt_delta = 0.99)
+```
+
+#### Random-effects meta-analysis with covariate `premean`
+### Fixed-effect meta-analysis with covariate `premean`
+
+We conducted a FE meta-regression model. The regression formula `~.trt:premean` means that the interaction of baseline blood pressure with treatent will be included. We increase `adapt_delta` to 0.99 to remove a small number of divergent transition errors.
+
+```{r}
+fit_RE_reg_agent_sys <- nma(net1,
+              seed = 17012024,
+              trt_effects = "random",
+              regression = ~.trt:premean,
+              prior_intercept = normal(scale = 10),
+              prior_trt = normal(scale = 10),
+              prior_reg = normal(scale = 100),
+              adapt_delta = 0.99)
+```
+
+```{r}
+fit_RE_reg_trt_sys <- nma(net2,
+              seed = 17012024,
+              trt_effects = "random",
+              regression = ~.trt:premean,
+              prior_intercept = normal(scale = 10),
+              prior_trt = normal(scale = 10),
+              prior_reg = normal(scale = 100),
+              adapt_delta = 0.99)
+```
+
+```{r}
+fit_RE_reg_agent_dias <- nma(net3,
+              seed = 17012024,
+              trt_effects = "random",
+              regression = ~.trt:premean,
+              prior_intercept = normal(scale = 10),
+              prior_trt = normal(scale = 10),
+              prior_reg = normal(scale = 100),
+              adapt_delta = 0.99)
+```
+
+```{r}
+fit_RE_reg_trt_dias <- nma(net4,
+              seed = 17012024,
+              trt_effects = "random",
+              regression = ~.trt:premean,
+              prior_intercept = normal(scale = 10),
+              prior_trt = normal(scale = 10),
+              prior_reg = normal(scale = 100),
+              adapt_delta = 0.99)
+```
+#### Model fit and comparison
+
+Model fit was checked comparing the residual deviance (on 147 data points), the number of parameters, and the Deviance Information Criterion (DIC).
+
+```{r, collapse=TRUE}
+# fixed-effect (no covariate)
+(dic_FE <- dic(fit_FE))
+
+# random-effects (no covariate)
+(dic_RE <- dic(fit_RE))
+
+# fixed-effect with covariate
+(dic_FE_cov <- dic(fit_FE_reg_agent_sys))
+
+# random-effects with covariate
+(dic_RE_cov <- dic(fit_RE_reg_agent_sys))
+
+```
+
+We might prefer the models with the baseline blood pressure as covariate due to the use of change from baseline scores as our main outcome, and the need of controlling them by baseline values. Based on methodological evidence, those models are also known as *ANCOVA* models, which give us greater statistical power. Moreover, between fixed-effect and random-effects model, we selected the **fixed-effect** model based on **parsimony**, since there are no huge differences between DIC values. In addition, the introduction of the intensity of the activity did not improve the fit of the model. This artifact could be cause by the fact that most of specific activities are associated with fixed intensities.
+
+We can observe the $\beta$ regression coefficients for the treatments below.
+
+```{r}
+plot(fit_FE_reg,
+     pars = "beta",
+     ref_line = 0,
+     stat = "halfeye")
+```
+
+In addition, we can inspect the residual deviance contributions for each data point to detect those that did not fit as well as expected.
+
+```{r, fig.width=15, fig.height=7}
+plot(dic_FE_cov)
+```
+
+#### Checking for inconsistency
+
+We first fit an unrelated mean effects (UME) model to assess the consistency assumption in NMAs.
+
+```{r}
+fit_inc <- nma(net,
+              seed = 17012024,
+              trt_effects = "fixed",
+              regression = ~.trt:premean,
+              prior_intercept = normal(scale = 10),
+              prior_trt = normal(scale = 10),
+              prior_reg = normal(scale = 100),
+              adapt_delta = 0.99,
+              consistency = "ume")
+```
+
+Next, we compare the model fit statistics of both models (*consistent* and UME).
+
+```{r, collapse=TRUE}
+# consistent model
+dic_FE_cov
+
+# UME model
+(dic_FE_inc <-  dic(fit_inc))
+```
+
+We see that our consistent model better fits the data. However, it is also important to examine the individual contributions to model fit of each data point under the two models (a so-called *dev-dev plot*).
+
+```{r, echo=FALSE, fig.height=6, fig.width=6}
+tiff("dev_dev_trt.tiff", height = 6, width = 6, res = 1200, units = "in")
+plot(dic_FE_cov, dic_FE_inc, show_uncertainty = FALSE)
+dev.off()
+```
+
+All points lie roughly on the line of equality, though there are some that lie on the UME model quadrant, reflecting worse fit. Thus, there is no evidence for inconsistency.
+
+### Relative effects
+
+We can produce estimates of the relative effect of different physical activity modalities in people with T2DM at any baseline blood pressure level.
+
+```{r, collapse=TRUE}
+# systolic blood pressure_agent
+(rel_effect_agent_sys <- relative_effects(fit_RE_reg_agent_sys,
+                                newdata = tibble::tibble(premean = seq(125, 145, 10)),
+                                study = paste(premean, "mmHg")))
+# systolic blood pressure_trt
+(rel_effect_trt_sys <- relative_effects(fit_FE_reg_trt_sys,
+                                newdata = tibble::tibble(premean = seq(125, 145, 10)),
+                                study = paste(premean, "mmHg")))
+# diastolic blood pressure_agent
+(rel_effect_agent_dias <- relative_effects(fit_FE_reg_agent_dias,
+                                newdata = tibble::tibble(premean = c(75, 85, 90)),
+                                study = paste(premean, "mmHg")))
+
+# diastolic blood pressure_trt
+(rel_effect_trt_dias <- relative_effects(fit_FE_reg_trt_dias,
+                                newdata = tibble::tibble(premean = c(75, 85, 90)),
+                                study = paste(premean, "mmHg")))
+```
+
+Next, we plot these estimates.
+
+```{r, fig.height=15, fig.width=8, echo=FALSE}
+tiff("rel_eff_agent_sys.tiff", height = 7, width = 7, units = "in", res = 300)
+plot(rel_effect_agent_sys, ref_line = 0, stat = "halfeye") +
+  scale_x_continuous(breaks = seq(-100, 100, 10))
+dev.off()
+```
+
+```{r, fig.height=15, fig.width=8, echo=FALSE}
+tiff("rel_eff_trt_sys.tiff", height = 7, width = 7, units = "in", res = 300)
+plot(rel_effect_trt_sys, ref_line = 0, stat = "halfeye") +
+  scale_x_continuous(breaks = seq(-100, 100, 10))
+dev.off()
+```
+
+```{r, fig.height=15, fig.width=8, echo=FALSE}
+tiff("rel_eff_agent_dias.tiff", height = 7, width = 7, units = "in", res = 300)
+plot(rel_effect_agent_dias, ref_line = 0, stat = "halfeye") +
+  scale_x_continuous(breaks = seq(-100, 100, 10))
+dev.off()
+```
+
+```{r, fig.height=15, fig.width=8, echo=FALSE}
+tiff("rel_eff_trt_dias.tiff", height = 7, width = 7, units = "in", res = 1200)
+plot(rel_effect_trt_dias, ref_line = 0, stat = "halfeye") +
+  scale_x_continuous(breaks = seq(-100, 100, 10))
+dev.off()
+```
+
+**Aerobic physical activity** was the unique intervention that achieved a statistically significant reduction of 3.77 $mmHg$ (95% CrI -5.92 to -1.63) on the systolic blood pressure of people with T2DM and elevated blood pressure (130 mmHg). For participants with a more severe hypertension stage, aerobic phyical activity achieved blood pressure reductions considered as clinically meaningful: -6.95 $mmHg$ (95% CrI -10.94 to -3.02) on hypertension stage 1 (140 $mmHg$), and -10.13 $mmHg$ (95% CrI -18.28 to -1.98) on hypertension stage 2 (150 $mmHg$). Interestingly, **mind-body training** showed potential benefits for people with stage 1 hypertension (MCFB = -13.73; 95% CrI -27.15 to 0.00).
+
+The unique intervention that achieved a statistically significant effect on participants with a baseline SBP of 130 $mmHg$ was **High Intensity Interval Training (HIIT)** (MCFB = -2.96; 95% CrI -5.60 to -0.29). The same happened for **HIIT** in participants with a baseline of 135 $mmHg$ (MCFB = -5.78; 95% CrI -9.19 to -2.30), and 140 $mmHg$ (MCFB = -8.60; 95% CrI -15.92 to -1.46). However, it is important to highlight that these effects could be considered as **clinically** meaningful reductions on SBP (i.e., between 5 to 10 $mmHg$ compared with baseline). Finally, for people with hypertension stage 2 (i.e., SBP greater than 140 $mmHg$), **mind-body training** (MCFB = -13.75; 95% CrI -27.42 to -0.54) and **HIIT** (MCFB = -11.42; 95% CrI -22.93 to -0.11) also achieved clinically important differences on SBP. From this baseline level, the heterogeneity on the effects is substantial.
+
+####sophisticated plot
+
+###### *Agent-level_systolic*
+
+```{r}
+# create range of baseline blood pressure levels
+lat.range <- range(sys.data$premean)
+
+# create tibble with 1-unit increase on blood pressure
+lat.dat <- tibble(premean = seq(lat.range[1], lat.range[2], 1))
+
+# data wrangling for fitting the plot
+lat.dat.2 <- tibble(premean = rep(seq(lat.range[1], lat.range[2], 1), each = 5))
+
+# data wrangling for fitting the plot
+trts <- tibble(trts = rep(net1$treatments[-1], 34))
+
+# get data for regression lines
+# Paso 1: Crear nueva secuencia de valores de presión basal
+lat.range <- range(sys.data$premean, na.rm = TRUE)
+
+lat.dat <- tibble(premean = seq(lat.range[1], lat.range[2], by = 1),
+                  study = paste(premean, "mmHg"))
+
+# Paso 2: Obtener efectos relativos a partir del modelo ajustado
+rel_effect_agent_sys <- relative_effects(
+  fit_FE_reg_agent_sys,
+  newdata = lat.dat,
+  study = lat.dat$study
+)
+
+# Paso 3: Expandir trt labels para mergearlos con predicciones
+trts <- tibble(trts = rep(net1$treatments[-1], times = nrow(lat.dat)))
+lat.dat_expanded <- lat.dat[rep(seq_len(nrow(lat.dat)), each = length(unique(trts$trts))), ]
+
+# Paso 4: Unir todo
+rel_effect <- as_tibble(rel_effect_agent_sys) %>%
+  bind_cols(lat.dat_expanded, trts)
+
+# Paso 5: Preparar base de datos con tamaños muestrales
+bcg_lor <- sys.data %>%
+  group_by(studyID) %>%
+  mutate(sample_size = sum(postn)) %>%
+  ungroup()
+
+# Paso 6: Gráfico final
+tiff("custom_agent_sys.tiff", height = 9, width = 10, units = "in", res = 300)
+
+bcg_lor %>%
+  filter(trt.2 != "Usual care") %>%
+  rename(trts = trt.2) %>%
+  ggplot(aes(x = premean)) +
+  geom_hline(yintercept = 0, col = "grey60") +
+  geom_ribbon(aes(ymin = `2.5%`, ymax = `97.5%`), data = rel_effect,
+              fill = "darkred", alpha = 0.3) +
+  geom_line(aes(y = mean), data = rel_effect, col = "darkred") +
+  geom_point(aes(y = y, size = sample_size), alpha = 0.4) +
+  facet_wrap(~trts, scales = "free") +
+  labs(x = "Baseline systolic blood pressure",
+       y = "Mean change from baseline (mmHg)") +
+  scale_size("Sample size") +
+  theme_multinma() +
+  theme(legend.position = "bottom") +
+  scale_y_continuous(breaks = seq(-100, 100, 10))
+
+dev.off()
+```
+
+###### *Agent-level_diastolic*
+
+```{r}
+# create range of baseline blood pressure levels
+lat.range <- range(dias.data$premean)
+
+# create tibble with 1-unit increase on blood pressure
+lat.dat <- tibble(premean = seq(lat.range[1], lat.range[2], 1))
+
+# data wrangling for fitting the plot
+lat.dat.2 <- tibble(premean = rep(seq(lat.range[1], lat.range[2], 1), each = 5))
+
+# data wrangling for fitting the plot
+trts <- tibble(trts = rep(net3$treatments[-1], 34))
+
+# get data for regression lines
+# Paso 1: Crear nueva secuencia de valores de presión basal
+lat.range <- range(dias.data$premean, na.rm = TRUE)
+
+lat.dat <- tibble(premean = seq(lat.range[1], lat.range[2], by = 1),
+                  study = paste(premean, "mmHg"))
+
+# Paso 2: Obtener efectos relativos a partir del modelo ajustado
+rel_effect_agent_dias <- relative_effects(
+  fit_FE_reg_agent_dias,
+  newdata = lat.dat,
+  study = lat.dat$study
+)
+
+# Paso 3: Expandir trt labels para mergearlos con predicciones
+trts <- tibble(trts = rep(net3$treatments[-1], times = nrow(lat.dat)))
+lat.dat_expanded <- lat.dat[rep(seq_len(nrow(lat.dat)), each = length(unique(trts$trts))), ]
+
+# Paso 4: Unir todo
+rel_effect <- as_tibble(rel_effect_agent_dias) %>%
+  bind_cols(lat.dat_expanded, trts)
+
+# Paso 5: Preparar base de datos con tamaños muestrales
+bcg_lor <- dias.data %>%
+  group_by(studyID) %>%
+  mutate(sample_size = sum(postn)) %>%
+  ungroup()
+
+# Paso 6: Gráfico final
+tiff("custom_agent_dias.tiff", height = 9, width = 10, units = "in", res = 300)
+
+bcg_lor %>%
+  filter(trt.2 != "Usual care") %>%
+  rename(trts = trt.2) %>%
+  ggplot(aes(x = premean)) +
+  geom_hline(yintercept = 0, col = "grey60") +
+  geom_ribbon(aes(ymin = `2.5%`, ymax = `97.5%`), data = rel_effect,
+              fill = "darkred", alpha = 0.3) +
+  geom_line(aes(y = mean), data = rel_effect, col = "darkred") +
+  geom_point(aes(y = y, size = sample_size), alpha = 0.4) +
+  facet_wrap(~trts, scales = "free") +
+  labs(x = "Baseline diastolic blood pressure",
+       y = "Mean change from baseline (mmHg)") +
+  scale_size("Sample size") +
+  theme_multinma() +
+  theme(legend.position = "bottom") +
+  scale_y_continuous(breaks = seq(-100, 100, 10))
+
+dev.off()
+```
+
+###### *Treatmen-level_systolic*
+
+```{r}
+# create range of baseline blood pressure levels
+lat.range <- range(sys.data$premean)
+
+# create tibble with 1-unit increase on blood pressure
+lat.dat <- tibble(premean = seq(lat.range[1], lat.range[2], 1))
+
+# data wrangling for fitting the plot
+lat.dat.2 <- tibble(premean = rep(seq(lat.range[1], lat.range[2], 1), each = 5))
+
+# data wrangling for fitting the plot
+trts <- tibble(trts = rep(net2$treatments[-1], 34))
+
+# get data for regression lines
+# Paso 1: Crear rango y secuencia de valores de presión sistólica basal
+lat.range <- range(sys.data$premean, na.rm = TRUE)
+lat.dat <- tibble(premean = seq(lat.range[1], lat.range[2], 1))
+
+# Paso 2: Obtener número de tratamientos (excluyendo "Usual care")
+n_trts <- length(net2$treatments[-1])
+trts <- tibble(trts = rep(net2$treatments[-1], times = nrow(lat.dat)))
+lat.dat.2 <- tibble(premean = rep(lat.dat$premean, each = n_trts))
+
+# Paso 3: Obtener efectos relativos desde el modelo ajustado
+rel_effect_trt_sys <- relative_effects(
+  fit_FE_reg_trt_sys,
+  newdata = lat.dat
+)
+
+# Paso 4: Verificación de consistencia de dimensiones
+stopifnot(
+  nrow(as_tibble(rel_effect_trt_sys)) == nrow(lat.dat.2),
+  nrow(as_tibble(rel_effect_trt_sys)) == nrow(trts)
+)
+
+# Paso 5: Combinar efectos con columnas auxiliares
+rel_effect <- as_tibble(rel_effect_trt_sys) %>%
+  bind_cols(lat.dat.2, trts)
+
+# Paso 6: Preparar datos observacionales para añadir puntos al gráfico
+bcg_lor <- sys.data %>%
+  group_by(studyID) %>%
+  mutate(sample_size = sum(postn)) %>%
+  ungroup()
+
+# Paso 7: Crear y guardar el gráfico
+tiff("custom_trt_sys.tiff", height = 9, width = 10, units = "in", res = 300)
+
+bcg_lor %>%
+  filter(trt != "Usual care") %>%
+  rename(trts = trt) %>%
+  ggplot(aes(x = premean)) +
+  geom_hline(yintercept = 0, col = "grey60") +
+  geom_ribbon(aes(ymin = `2.5%`, ymax = `97.5%`), data = rel_effect,
+              fill = "darkred", alpha = 0.3) +
+  geom_line(aes(y = mean), data = rel_effect, col = "darkred") +
+  geom_point(aes(y = y, size = sample_size), alpha = 0.4) +
+  facet_wrap(~trts, scales = "free") +
+  labs(x = "Baseline systolic blood pressure",
+       y = "Mean change from baseline (mmHg)") +
+  scale_size("Sample size") +
+  theme_multinma() +
+  theme(legend.position = "bottom") +
+  scale_y_continuous(breaks = seq(-100, 100, 10))
+
+dev.off()
+```
+
+###### *Treatmen-level_diastolic*
+
+```{r}
+# create range of baseline blood pressure levels
+lat.range <- range(dias.data$premean)
+
+# create tibble with 1-unit increase on blood pressure
+lat.dat <- tibble(premean = seq(lat.range[1], lat.range[2], 1))
+
+# data wrangling for fitting the plot
+lat.dat.2 <- tibble(premean = rep(seq(lat.range[1], lat.range[2], 1), each = 5))
+
+# data wrangling for fitting the plot
+trts <- tibble(trts = rep(net4$treatments[-1], 34))
+
+# get data for regression lines
+# Paso 1: Crear rango y secuencia de valores de presión sistólica basal
+lat.range <- range(dias.data$premean, na.rm = TRUE)
+lat.dat <- tibble(premean = seq(lat.range[1], lat.range[2], 1))
+
+# Paso 2: Obtener número de tratamientos (excluyendo "Usual care")
+n_trts <- length(net4$treatments[-1])
+trts <- tibble(trts = rep(net4$treatments[-1], times = nrow(lat.dat)))
+lat.dat.2 <- tibble(premean = rep(lat.dat$premean, each = n_trts))
+
+# Paso 3: Obtener efectos relativos desde el modelo ajustado
+rel_effect_trt_dias <- relative_effects(
+  fit_FE_reg_trt_dias,
+  newdata = lat.dat
+)
+
+# Paso 4: Verificación de consistencia de dimensiones
+stopifnot(
+  nrow(as_tibble(rel_effect_trt_dias)) == nrow(lat.dat.2),
+  nrow(as_tibble(rel_effect_trt_dias)) == nrow(trts)
+)
+
+# Paso 5: Combinar efectos con columnas auxiliares
+rel_effect <- as_tibble(rel_effect_trt_dias) %>%
+  bind_cols(lat.dat.2, trts)
+
+# Paso 6: Preparar datos observacionales para añadir puntos al gráfico
+bcg_lor <- dias.data %>%
+  group_by(studyID) %>%
+  mutate(sample_size = sum(postn)) %>%
+  ungroup()
+
+# Paso 7: Crear y guardar el gráfico
+tiff("custom_trt_dias.tiff", height = 9, width = 10, units = "in", res = 300)
+
+bcg_lor %>%
+  filter(trt != "Usual care") %>%
+  rename(trts = trt) %>%
+  ggplot(aes(x = premean)) +
+  geom_hline(yintercept = 0, col = "grey60") +
+  geom_ribbon(aes(ymin = `2.5%`, ymax = `97.5%`), data = rel_effect,
+              fill = "darkred", alpha = 0.3) +
+  geom_line(aes(y = mean), data = rel_effect, col = "darkred") +
+  geom_point(aes(y = y, size = sample_size), alpha = 0.4) +
+  facet_wrap(~trts, scales = "free") +
+  labs(x = "Baseline diastolic blood pressure",
+       y = "Mean change from baseline (mmHg)") +
+  scale_size("Sample size") +
+  theme_multinma() +
+  theme(legend.position = "bottom") +
+  scale_y_continuous(breaks = seq(-100, 100, 10))
+
+dev.off()
+```
+
+### Treatment rankings at agent level
+
+We computed posterior treatment rankings from meta-regression models to obtain a ranking by study population (i.e., different baseline systolic blood pressure levels).
+
+```{r, fig.height=12, fig.width=8, collapse=TRUE}
+# treatment rankings agent sys
+(rank_agent_sys <- posterior_ranks(fit_FE_reg_agent_sys, 
+                         lower_better = TRUE, 
+                         newdata = tibble(premean = c(125, 135, 145)),
+                         study = paste(premean, "mmHg")))
+
+# plot sys agent
+tiff("rank_sys_agent.tiff", height = 7, width = 7, units = "in", res = 300)
+plot(rank_agent_sys)
+dev.off()
+
+# treatment rankings agent dias
+(rank_agent_dias <- posterior_ranks(fit_FE_reg_agent_dias, 
+                         lower_better = TRUE, 
+                         newdata = tibble(premean = c(75, 85, 90)),
+                         study = paste(premean, "mmHg")))
+
+# plot dias agent
+tiff("rank_dias_agent.tiff", height = 7, width = 7, units = "in", res = 300)
+plot(rank_agent_dias)
+dev.off()
+```
+
+**Aerobic physical activities** was the best ranked intervention for people with elevated blood pressure. However, for people diagnosed with stages 1 and 2 of hypertension, mind-body activities were the most recommended type of intervention.
+
+##### *Ranking at treatment-level*
+
+```{r, fig.height=12, fig.width=8, collapse=TRUE}
+# treatment rankings trt sys
+(rank_trt_sys <- posterior_ranks(fit_FE_reg_trt_sys, 
+                         lower_better = TRUE, 
+                         newdata = tibble(premean = c(125, 135, 145)),
+                         study = paste(premean, "mmHg")))
+
+# plot sys trt
+tiff("rank_sys_trt.tiff", height = 7, width = 7, units = "in", res = 300)
+plot(rank_trt_sys)
+dev.off()
+
+# treatment rankings agent dias
+(rank_trt_dias <- posterior_ranks(fit_FE_reg_trt_dias, 
+                         lower_better = TRUE, 
+                         newdata = tibble(premean = c(75, 85, 90)),
+                         study = paste(premean, "mmHg")))
+
+# plot dias agent
+tiff("rank_dias_trt.tiff", height = 7, width = 7, units = "in", res = 300)
+plot(rank_trt_dias)
+dev.off()
+```
+
+At lower baseline SBP levels (below 130 $mmHg$; i.e., normal or elevated SBP), the modalities of **cycling**, **resistance exercises**, and **walking** seem to be the most effective interventions. Above this value (for hypertension stages 1 and 2), the modalities that had associated greatest SBP reductions were **mind-body training**, **HIIT**, and **mixed aerobic exercises**, since **running** presented large relative effects heterogeneity.
+
+###SYSTOLIC DOSE
+
+#### OV-Dose Response OVERALL
+
+Let's plot the applied dose of physical activity (i.e., weekly energy expenditure) and the changr from baseline to observe potential dose-response relationship forms.
+
+```{r}
+if (!all(c("weekly_dose", "y") %in% names(sys.data))) {
+  stop("❌ La tabla `sys.data` no tiene las columnas necesarias: 'weekly_dose' y 'y'")
+}
+
+lin.plot <- ggplot(sys.data, aes(x = weekly_dose, y = y)) +
+  geom_hline(yintercept = 0, col = "red") +
+  geom_point() +
+  geom_smooth(method = "lm", col = "blue") +
+  labs(
+    x = "Physical Activity Dose (METs-min/week)",
+    y = "Change from baseline (mmHg)",
+    title = "Linear regression method"
+  ) +
+  scale_y_continuous(breaks = seq(-20, 10, 5)) +
+  theme_minimal()
+
+l.plot <- ggplot(sys.data, aes(x = weekly_dose, y = y)) +
+  geom_hline(yintercept = 0, col = "red") +
+  geom_point() +
+  geom_smooth(method = "loess", col = "gold") +
+  labs(
+    x = "Physical Activity Dose (METs-min/week)",
+    y = "Change from baseline (mmHg)",
+    title = "LOESS method"
+  ) +
+  scale_y_continuous(breaks = seq(-20, 10, 5)) +
+  theme_minimal()
+
+n2.plot <- ggplot(sys.data, aes(x = weekly_dose, y = y)) +
+  geom_hline(yintercept = 0, col = "red") +
+  geom_point() +
+  geom_smooth(method = "lm", formula = y ~ ns(x, 2), col = "red") +
+  labs(
+    x = "Physical Activity Dose (METs-min/week)",
+    y = "Change from baseline (mmHg)",
+    title = "Natural spline (2 knots)"
+  ) +
+  scale_y_continuous(breaks = seq(-20, 10, 5)) +
+  theme_minimal()
+
+n3.plot <- ggplot(sys.data, aes(x = weekly_dose, y = y)) +
+  geom_hline(yintercept = 0, col = "red") +
+  geom_point() +
+  geom_smooth(method = "lm", formula = y ~ ns(x, 3), col = "black") +
+  labs(
+    x = "Physical Activity Dose (METs-min/week)",
+    y = "Change from baseline (mmHg)",
+    title = "Natural spline (3 knots)"
+  ) +
+  scale_y_continuous(breaks = seq(-20, 10, 5)) +
+  theme_minimal()
+
+# Crear y guardar el gráfico
+tiff("DOSE_Systolic.tiff", height = 9, width = 10, units = "in", res = 300)
+
+grid.arrange(lin.plot, l.plot, n2.plot, n3.plot, nrow = 2)
+
+dev.off()
+```
+
+##### Estadistico - Dosis Systolic blood pressure
+
+```{r}
+# 🔍 Modelo lineal simple
+lm_simple <- lm(y ~ weekly_dose, data = sys.data)
+summary(lm_simple)  # Revisa el valor-p del coeficiente de weekly_dose
+
+# 📈 Modelo con spline natural (2 grados de libertad)
+lm_spline2 <- lm(y ~ ns(weekly_dose, 2), data = sys.data)
+
+# 📊 Comparación de modelos: lineal vs spline
+anova(lm_simple, lm_spline2)
+
+# 📦 Modelo con spline más flexible (3 grados de libertad)
+lm_spline3 <- lm(y ~ ns(weekly_dose, 3), data = sys.data)
+
+# 📊 Comparación lineal vs spline 3
+anova(lm_simple, lm_spline3)
+
+# ✅ Evaluación del modelo categórico
+# Clasificamos dosis en 4 grupos (personalizable)
+sys.data$dose_group <- cut(
+  sys.data$weekly_dose,
+  breaks = c(-Inf, 0, 500, 1000, Inf),
+  labels = c("Usual Care", "Low", "Medium", "High")
+)
+
+# Modelo categórico (ANOVA)
+lm_cat <- aov(y ~ dose_group, data = sys.data)
+summary(lm_cat)
+
+# Comparaciones múltiples entre grupos
+TukeyHSD(lm_cat)
+
+```
+
+Existe una relación dosis-respuesta estadísticamente significativa entre la actividad física semanal y la reducción de presión sistólica en el análisis global (overall).
+
+Los modelos con splines mejoran la explicación, revelando una posible forma no lineal, mientras que los análisis categóricos sugieren que el beneficio clínico se concentra en alcanzar un umbral mínimo de actividad física, sin ganancias adicionales sustanciales en dosis más altas.
+
+Los splines explican mejor la variabilidad que el modelo lineal simple (ambos p \< 0.001).
+
+El modelo con 2 o 3 df es mejor que el lineal.
+
+No hay una mejora marcada de 3 df sobre 2 df (F de mejora es leve), por tanto, ns(x, 2) podría ser preferible si se busca parsimonia.
+
+##### Dosis Óptima Systolic blood pressure
+
+```{r}
+
+# Preprocesamiento
+sys.data_valido <- sys.data %>%
+  filter(!is.na(y), !is.na(weekly_dose))
+
+# Modelo robusto
+ajustar_spline_seguro <- function(data) {
+  modelo <- lm(y ~ ns(weekly_dose, 3), data = data)
+  if (qr(model.matrix(modelo))$rank < ncol(model.matrix(modelo))) {
+    message("⚠️ Spline(3) no viable, usando spline(2)")
+    modelo <- lm(y ~ ns(weekly_dose, 2), data = data)
+  }
+  return(modelo)
+}
+
+lm_spline <- ajustar_spline_seguro(sys.data_valido)
+
+# Predicciones
+doses <- seq(min(sys.data_valido$weekly_dose), max(sys.data_valido$weekly_dose), length.out = 1000)
+pred_df <- data.frame(weekly_dose = doses)
+pred_df$predicted <- predict(lm_spline, newdata = pred_df)
+
+# Dosis óptima
+optimal_index <- which.min(pred_df$predicted)
+optimal_dose <- pred_df$weekly_dose[optimal_index]
+optimal_response <- pred_df$predicted[optimal_index]
+
+# Resultados
+cat("📍 Dosis óptima estimada:", round(optimal_dose, 1), "MET-min/semana\n")
+cat("🩺 Cambio estimado en presión sistólica:", round(optimal_response, 2), "mmHg\n")
+
+# Gráfico limpio y robusto
+ggplot(sys.data_valido, aes(x = weekly_dose, y = y)) +
+  geom_point(alpha = 0.6) +
+  geom_line(data = pred_df, aes(x = weekly_dose, y = predicted), color = "blue", size = 1) +
+  geom_vline(xintercept = optimal_dose, linetype = "dashed", color = "red") +
+  annotate("text", x = optimal_dose, y = min(pred_df$predicted),
+           label = paste0("Dosis óptima:\n", round(optimal_dose, 0), " MET-min/sem"),
+           hjust = -0.1, color = "red") +
+  labs(
+    x = "Dosis semanal (MET-min)",
+    y = "Cambio en presión sistólica (mmHg)",
+    title = "Curva dosis-respuesta con dosis óptima (modelo externo)"
+  ) +
+  theme_minimal()
+
+```
+
+
+##### Dosis minima, maxima y optima Systolic blood pressure
+
+```{r}
+
+library(ggplot2)
+library(splines)
+library(dplyr)
+
+# ⚙️ Paso 1: Validar y limpiar datos
+sys.data_valido <- sys.data %>%
+  filter(!is.na(y), !is.na(weekly_dose))
+
+# ⚙️ Paso 2: Modelo spline robusto
+ajustar_spline_seguro <- function(data) {
+  modelo <- lm(y ~ ns(weekly_dose, 3), data = data)
+  if (qr(model.matrix(modelo))$rank < ncol(model.matrix(modelo))) {
+    message("⚠️ Modelo spline(3) rank-deficient, usando spline(2)")
+    modelo <- lm(y ~ ns(weekly_dose, 2), data = data)
+  }
+  return(modelo)
+}
+
+lm_spline <- ajustar_spline_seguro(sys.data_valido)
+
+# 📈 Paso 3: Curva predicha + IC
+doses <- seq(min(sys.data_valido$weekly_dose), max(sys.data_valido$weekly_dose), length.out = 1000)
+pred_data <- data.frame(weekly_dose = doses)
+preds <- predict(lm_spline, newdata = pred_data, interval = "confidence")
+pred_curve <- cbind(pred_data, preds)
+
+# 📍 Paso 4: Dosis óptima
+opt_index <- which.min(pred_curve$fit)
+dose_optimal <- pred_curve$weekly_dose[opt_index]
+y_optimal <- pred_curve$fit[opt_index]
+
+# 🟦 Paso 5: Zona OMS
+shade_min <- 600
+shade_max <- 1200
+
+# 🖼️ Paso 6: Graficar con robustez
+tiff("Curva_Dosis_Con_Optima_Sistolica.tiff", width = 9, height = 6, units = "in", res = 300)
+
+
+# Si no lo has hecho antes, define el rango del eje Y si lo necesitas
+y_min <- min(pred_curve$lwr)
+y_max <- max(pred_curve$upr)
+
+ggplot() +
+  # Área sombreada de recomendaciones de la OMS
+  geom_rect(
+    aes(xmin = shade_min, xmax = shade_max, ymin = -Inf, ymax = Inf),
+    fill = "gray70", alpha = 0.2
+  ) +
+
+  # Curva de predicción en negro
+  geom_line(
+    data = pred_curve,
+    aes(x = weekly_dose, y = fit),
+    color = "black", size = 1
+  ) +
+  
+  # Intervalos de confianza (líneas punteadas)
+  geom_line(
+    data = pred_curve,
+    aes(x = weekly_dose, y = lwr),
+    linetype = "dashed", color = "black"
+  ) +
+  geom_line(
+    data = pred_curve,
+    aes(x = weekly_dose, y = upr),
+    linetype = "dashed", color = "black"
+  ) +
+
+  # Línea roja corta centrada en el punto óptimo
+  geom_segment(
+    aes(
+      x = dose_optimal, xend = dose_optimal,
+      y = y_optimal - 0.0,
+      yend = y_optimal + 5.0
+    ),
+    color = "red", linewidth = 0.8
+  ) +
+
+  # Punto rojo en la dosis óptima
+  geom_point(
+    aes(x = dose_optimal, y = y_optimal),
+    color = "red", size = 3
+  ) +
+
+  # Texto vertical cerca del punto rojo
+  annotate(
+    "text",
+    x = dose_optimal + 15,
+    y = y_optimal + 2.5,
+    label = paste0("MCID at ", round(dose_optimal), " METs-min/week"),
+    angle = 90, hjust = 0.3, vjust = 0.9,
+    color = "red", size = 3.4
+  ) +
+
+  # Texto centrado en el área gris
+  annotate(
+    "text",
+    x = (shade_min + shade_max) / 2,
+    y = max(pred_curve$fit) + 1.7,
+    label = "WHO PA recommendations",
+    size = 4.5
+  ) +
+  
+  # Ejes
+  labs(
+    x = "Physical activity dose (METs-min/week)",
+    y = "Estimated change in systolic blood pressure (Δ mmHg)"
+  ) +
+
+  # Tema y tipografía
+  theme_minimal() +
+  theme(
+    text = element_text(family = "Arial"),
+    plot.title = element_text(size = 14, face = "bold")
+  )
+
+
+```
+
+#### AG-Dose Response Agent level
+
+##### Estadistico - Dosis Systolic blood pressure at agent level
+
+```{r}
+
+# Filtrar agentes válidos
+sys.data_activos <- sys.data[!sys.data$trt.2 %in% c("Usual care", "Flexibility"), ]
+
+# Agrupar por agente
+agente_split <- split(sys.data_activos, sys.data_activos$trt.2)
+
+# Loop para mostrar salida como en OVERALL
+for (nombre_agente in names(agente_split)) {
+  datos <- agente_split[[nombre_agente]]
+  
+  if (nrow(datos) < 5 || length(unique(datos$weekly_dose)) < 4) {
+    cat("\n⛔ Agente:", nombre_agente, "- Insuficiente variación\n")
+    next
+  }
+  
+  cat("\n==============================")
+  cat("\n📊 Agente:", nombre_agente, "\n")
+  cat("==============================\n")
+  
+  modelo_lin <- lm(y ~ weekly_dose, data = datos)
+  modelo_ns2 <- lm(y ~ ns(weekly_dose, 2), data = datos)
+  modelo_ns3 <- lm(y ~ ns(weekly_dose, 3), data = datos)
+  
+  cat("\n🔹 Modelo Lineal:\n")
+  print(summary(modelo_lin))
+  
+  cat("\n🔸 ANOVA: Lineal vs Spline (2 df):\n")
+  print(anova(modelo_lin, modelo_ns2))
+  
+  cat("\n🔸 ANOVA: Lineal vs Spline (3 df):\n")
+  print(anova(modelo_lin, modelo_ns3))
+}
+
+# Filtrar agentes válidos
+sys.data_activos <- sys.data[!sys.data$trt.2 %in% c("Usual care", "Flexibility"), ]
+
+# Agrupar por agente
+agente_split <- split(sys.data_activos, sys.data_activos$trt.2)
+
+# Loop por agente para mostrar resultados
+for (nombre_agente in names(agente_split)) {
+  datos <- agente_split[[nombre_agente]]
+  
+  if (nrow(datos) < 5 || length(unique(datos$weekly_dose)) < 4) {
+    cat("\n⛔ Agente:", nombre_agente, "- Insuficiente variación\n")
+    next
+  }
+  
+  cat("\n\n======================================")
+  cat("\n📊 Análisis de agente:", nombre_agente)
+  cat("\n======================================\n")
+  
+  # 📌 Modelo lineal simple
+  modelo_lin <- lm(y ~ weekly_dose, data = datos)
+  cat("\n🔹 Modelo Lineal:\n")
+  print(summary(modelo_lin))
+  
+  # 📈 Comparación con spline (2 df)
+  modelo_ns2 <- lm(y ~ ns(weekly_dose, 2), data = datos)
+  cat("\n🔸 ANOVA: Lineal vs Spline (2 df):\n")
+  print(anova(modelo_lin, modelo_ns2))
+  
+  # 📈 Comparación con spline (3 df)
+  modelo_ns3 <- lm(y ~ ns(weekly_dose, 3), data = datos)
+  cat("\n🔸 ANOVA: Lineal vs Spline (3 df):\n")
+  print(anova(modelo_lin, modelo_ns3))
+  
+  # ✅ Clasificación por grupos de dosis
+  datos$dose_group <- cut(
+    datos$weekly_dose,
+    breaks = c(-Inf, 0, 500, 1000, Inf),
+    labels = c("Usual Care", "Low", "Medium", "High")
+  )
+  
+  # ⚠️ Evitar errores por grupos vacíos
+  if (length(unique(na.omit(datos$dose_group))) < 2) {
+    cat("\n⚠️ No se puede realizar ANOVA categórica (grupos insuficientes)\n")
+    next
+  }
+  
+  # 📊 ANOVA categórico
+  modelo_cat <- aov(y ~ dose_group, data = datos)
+  cat("\n✅ ANOVA por grupo de dosis (categorías):\n")
+  print(summary(modelo_cat))
+  
+  # 🧪 Comparaciones múltiples
+  cat("\n🔍 Comparaciones múltiples (Tukey HSD):\n")
+  print(TukeyHSD(modelo_cat))
+}
+
+
+```
+
+Ninguno de los agentes (Aerobic, Mind-body, Multicomponent, Resistance) muestra una relación dosis-respuesta estadísticamente significativa en presión sistólica, ni bajo modelos lineales, ni spline, ni por categorías.
+
+Explorando los agent level por cada categoria del baseline tampoco aparecen dosis significativa. Solo en Excepción leve para Aerobic – Alta presión inicial:
+Tiene una dosis óptima estimada de 422.4 MET-min y una caída de −9.59 mmHg. Su R² ajustado es 0.832 → si ese valor está bien calculado, podría ser una excepción.
+Pero no hemos visto los p-valores para ese modelo concreto estratificado por nivel basal, así que no podemos concluir significancia aún sin el modelo completo para esa subpoblación.
+
+###### Dosis Óptima Systolic blood pressure agent level
+Se deja aqui pero al no salir nada significativo en los estadisticos, no merece la pena calcular unos datos y presentarlos. Igualmente dejamos el código para adaptarlo a otros metaánalisis
+```{r}
+# Filtrar solo agentes activos
+sys.data_agente <- sys.data %>%
+  filter(!trt.2 %in% c("Usual care", "Flexibility"))
+
+# Dividir datos por agente
+split_agente <- split(sys.data_agente, sys.data_agente$trt.2)
+
+# Función para calcular dosis óptima y graficar
+optima_agente <- map(split_agente, function(datos) {
+  if (nrow(datos) < 5 || length(unique(datos$weekly_dose)) < 4) return(NULL)
+
+  modelo <- lm(y ~ ns(weekly_dose, 3), data = datos)
+  
+  dosis_seq <- seq(min(datos$weekly_dose), max(datos$weekly_dose), length.out = 1000)
+  predicciones <- predict(modelo, newdata = data.frame(weekly_dose = dosis_seq))
+  
+  opt_index <- which.min(predicciones)
+  opt_dose <- dosis_seq[opt_index]
+  opt_resp <- predicciones[opt_index]
+  
+  grafico <- ggplot(datos, aes(x = weekly_dose, y = y)) +
+    geom_point(alpha = 0.5) +
+    stat_smooth(method = "lm", formula = y ~ ns(x, 3), col = "blue", se = FALSE) +
+    geom_vline(xintercept = opt_dose, linetype = "dashed", color = "red") +
+    annotate("text", x = opt_dose, y = min(predicciones),
+             label = paste0(round(opt_dose, 0), " MET-min/sem"),
+             hjust = -0.1, color = "red") +
+    labs(title = paste("Dosis óptima -", unique(datos$trt.2)),
+         x = "Dosis semanal (MET-min)", y = "Cambio en presión sistólica (mmHg)") +
+    theme_minimal()
+  
+  list(
+    agente = unique(datos$trt.2),
+    dosis_optima = round(opt_dose, 1),
+    cambio_estimado = round(opt_resp, 2),
+    grafico = grafico
+  )
+})
+
+# Filtrar resultados válidos
+optima_agente <- compact(optima_agente)
+
+# Imprimir resumen de dosis óptimas
+map_dfr(optima_agente, ~tibble(
+  agente = .x$agente,
+  dosis_optima = .x$dosis_optima,
+  cambio_estimado = .x$cambio_estimado
+))
+
+# Por ejemplo, para ver la de Aerobic
+optima_agente[["Aerobic"]]$grafico
+
+# O para recorrerlas todas:
+walk(optima_agente, ~print(.x$grafico))
+
+
+```
+
+###### Dosis minima, maxima y optima Systolic blood pressure at agent level
+Se deja aqui pero al no salir nada significativo en los estadisticos, no merece la pena calcular unos datos y presentarlos. Igualmente dejamos el código para adaptarlo a otros metaánalisis
+```{r}
+library(ggplot2)
+library(splines)
+library(dplyr)
+library(purrr)
+
+# Definir zona recomendada por la OMS
+shade_min <- 600
+shade_max <- 1200
+
+# Filtrar solo agentes activos (excluyendo Usual care y Flexibility)
+sys.data_agente <- sys.data %>% 
+  filter(!trt.2 %in% c("Usual care", "Flexibility"))
+
+# Separar por agente
+split_agente <- split(sys.data_agente, sys.data_agente$trt.2)
+
+# Función para generar gráfico con curva spline, IC y zona OMS
+grafico_dosis_agente <- map(split_agente, function(df) {
+  if (nrow(df) < 5 || length(unique(df$weekly_dose)) < 4) return(NULL)
+  
+  modelo <- lm(y ~ ns(weekly_dose, 3), data = df)
+  
+  dosis_seq <- seq(min(df$weekly_dose), max(df$weekly_dose), length.out = 1000)
+  pred_data <- data.frame(weekly_dose = dosis_seq)
+  preds <- predict(modelo, newdata = pred_data, interval = "confidence")
+  pred_curve <- cbind(pred_data, preds)
+  
+  opt_index <- which.min(pred_curve$fit)
+  dose_opt <- pred_curve$weekly_dose[opt_index]
+  y_opt <- pred_curve$fit[opt_index]
+  
+  g <- ggplot() +
+    geom_rect(aes(xmin = shade_min, xmax = shade_max, ymin = -Inf, ymax = Inf),
+              fill = "gray70", alpha = 0.2) +
+    geom_line(data = pred_curve, aes(x = weekly_dose, y = fit), size = 1) +
+    geom_line(data = pred_curve, aes(x = weekly_dose, y = lwr), linetype = "dashed") +
+    geom_line(data = pred_curve, aes(x = weekly_dose, y = upr), linetype = "dashed") +
+    geom_vline(xintercept = dose_opt, linetype = "dashed", color = "red", linewidth = 0.8) +
+    annotate("text", x = dose_opt, y = y_opt,
+             label = paste0("Optimal ≈ ", round(dose_opt, 0), " MET-min"),
+             vjust = -0.7, hjust = -0.05, color = "red", size = 4) +
+    annotate("text", x = (shade_min + shade_max)/2, y = max(pred_curve$fit),
+             label = "WHO PA recommendations", vjust = -0.5, size = 4) +
+    annotate("text", x = 0, y = min(pred_curve$lwr),
+             label = "Model fit:\nSpline (3 df)", hjust = 0, vjust = 0, fontface = "bold") +
+    labs(
+      title = paste("Dose-response by agent:", unique(df$trt.2)),
+      x = "Dose of physical activity (METs-min/week)",
+      y = "Estimated effect (Δ systolic BP)"
+    ) +
+    theme_minimal()
+  
+  list(
+    agente = unique(df$trt.2),
+    dosis_optima = round(dose_opt, 1),
+    efecto_optimo = round(y_opt, 2),
+    grafico = g
+  )
+})
+
+# Limpiar nulos
+grafico_dosis_agente <- compact(grafico_dosis_agente)
+
+# Mostrar tabla resumen
+map_dfr(grafico_dosis_agente, ~ tibble(
+  agente = .x$agente,
+  dosis_optima = .x$dosis_optima,
+  cambio_estimado = .x$efecto_optimo
+))
+
+
+# Ver un gráfico específico (por ejemplo, Aerobic)
+grafico_dosis_agente[["Aerobic"]]$grafico
+
+# Mostrar todos
+walk(grafico_dosis_agente, ~print(.x$grafico))
+
+
+```
+
+#### TRT - Dose Response Treatment level
+
+##### Estadistico - Dosis Systolic blood pressure
+
+```{r}
+
+# Filtrar tratamientos válidos
+sys.data_validos <- sys.data[!sys.data$trt %in% c("Usual care", "Flexibility"), ]
+
+# Agrupar por tratamiento
+tratamiento_split <- split(sys.data_validos, sys.data_validos$trt)
+
+# Loop por tratamiento
+for (nombre_trt in names(tratamiento_split)) {
+  datos <- tratamiento_split[[nombre_trt]]
+  
+  if (nrow(datos) < 5 || length(unique(datos$weekly_dose)) < 4) {
+    cat("\n⛔ Tratamiento:", nombre_trt, "- Insuficiente variación\n")
+    next
+  }
+  
+  cat("\n\n===========================================")
+  cat("\n📊 Análisis del tratamiento:", nombre_trt)
+  cat("\n===========================================\n")
+  
+  # 📌 Modelo lineal simple
+  modelo_lin <- lm(y ~ weekly_dose, data = datos)
+  cat("\n🔹 Modelo Lineal:\n")
+  print(summary(modelo_lin))
+  
+  # 📈 Comparación con spline (2 df)
+  modelo_ns2 <- lm(y ~ ns(weekly_dose, 2), data = datos)
+  cat("\n🔸 ANOVA: Lineal vs Spline (2 df):\n")
+  print(anova(modelo_lin, modelo_ns2))
+  
+  # 📈 Comparación con spline (3 df)
+  modelo_ns3 <- lm(y ~ ns(weekly_dose, 3), data = datos)
+  cat("\n🔸 ANOVA: Lineal vs Spline (3 df):\n")
+  print(anova(modelo_lin, modelo_ns3))
+  
+  # ✅ Clasificación por grupos de dosis
+  datos$dose_group <- cut(
+    datos$weekly_dose,
+    breaks = c(-Inf, 0, 500, 1000, Inf),
+    labels = c("Usual Care", "Low", "Medium", "High")
+  )
+  
+  if (length(unique(na.omit(datos$dose_group))) < 2) {
+    cat("\n⚠️ No se puede realizar ANOVA categórica (grupos insuficientes)\n")
+    next
+  }
+  
+  # 📊 ANOVA categórico
+  modelo_cat <- aov(y ~ dose_group, data = datos)
+  cat("\n✅ ANOVA por grupo de dosis (categorías):\n")
+  print(summary(modelo_cat))
+  
+  # 🧪 Comparaciones múltiples
+  cat("\n🔍 Comparaciones múltiples (Tukey HSD):\n")
+  print(TukeyHSD(modelo_cat))
+}
+
+```
+Cycling muestra una posible dosis óptima significativa en presión sistólica, según el modelo spline.
+
+Todos los demás tratamientos no presentan una relación dosis-respuesta estadísticamente significativa.
+
+Este p-valor es estadísticamente significativo (p < 0.05)
+→ Indica que la relación dosis-respuesta no es lineal y el modelo flexible mejora el ajuste
+
+⚠️ Consideraciones:
+El tamaño de muestra es pequeño (n = 10).
+
+Aunque significativo, la robustez puede ser limitada. Aun así, es el único tratamiento con evidencia significativa en el ajuste dosis-respuesta spline.
+
+
+##### Dosis Óptima Systolic blood pressure agent level
+Sacamos la dosis y ploteamos el único tratamiento significativo: Cycling
+```{r}
+
+# Filtrar tratamientos activos
+sys.data_trt <- sys.data %>%
+  filter(!trt %in% c("Usual care", "Flexibility"))
+
+# Dividir por tratamiento
+split_trt <- split(sys.data_trt, sys.data_trt$trt)
+
+# Función para calcular dosis óptima y graficar
+optima_tratamiento <- map(split_trt, function(datos) {
+  if (nrow(datos) < 5 || length(unique(datos$weekly_dose)) < 4) return(NULL)
+  
+  modelo <- lm(y ~ ns(weekly_dose, 3), data = datos)
+  
+  dosis_seq <- seq(min(datos$weekly_dose), max(datos$weekly_dose), length.out = 1000)
+  predicciones <- predict(modelo, newdata = data.frame(weekly_dose = dosis_seq))
+  
+  opt_index <- which.min(predicciones)
+  opt_dose <- dosis_seq[opt_index]
+  opt_resp <- predicciones[opt_index]
+  
+  grafico <- ggplot(datos, aes(x = weekly_dose, y = y)) +
+    geom_point(alpha = 0.5) +
+    stat_smooth(method = "lm", formula = y ~ ns(x, 3), col = "blue", se = FALSE) +
+    geom_vline(xintercept = opt_dose, linetype = "dashed", color = "red") +
+    annotate("text", x = opt_dose, y = min(predicciones),
+             label = paste0(round(opt_dose, 0), " MET-min/sem"),
+             hjust = -0.1, color = "red") +
+    labs(title = paste("Dosis óptima -", unique(datos$trt)),
+         x = "Dosis semanal (MET-min)", y = "Cambio en presión sistólica (mmHg)") +
+    theme_minimal()
+  
+  list(
+    tratamiento = unique(datos$trt),
+    dosis_optima = round(opt_dose, 1),
+    cambio_estimado = round(opt_resp, 2),
+    grafico = grafico
+  )
+})
+
+# Limpiar resultados nulos
+optima_tratamiento <- compact(optima_tratamiento)
+
+# Mostrar resumen tabular
+map_dfr(optima_tratamiento, ~tibble(
+  tratamiento = .x$tratamiento,
+  dosis_optima = .x$dosis_optima,
+  cambio_estimado = .x$cambio_estimado
+))
+
+# Ver gráfico para cycling, por ejemplo:
+optima_tratamiento[["Cycling"]]$grafico
+
+# O imprimir todos:
+#walk(optima_tratamiento, ~print(.x$grafico))
+
+
+```
+
+##### Dosis minima, maxima y optima Systolic blood pressure
+Sacamos la dosis y ploteamos el único tratamiento significativo: Cycling
+
+```{r}
+
+# Zona de recomendación OMS
+shade_min <- 600
+shade_max <- 1200
+
+# Filtrar tratamientos activos (sin Usual care)
+sys.data_trat <- sys.data %>% 
+  filter(trt != "Usual care")
+
+# Separar por tratamiento específico
+split_trat <- split(sys.data_trat, sys.data_trat$trt)
+
+# Función para generar gráfico por tratamiento
+grafico_dosis_trat <- map(split_trat, function(df) {
+  if (nrow(df) < 5 || length(unique(df$weekly_dose)) < 4) return(NULL)
+  
+  modelo <- lm(y ~ ns(weekly_dose, 3), data = df)
+  
+  dosis_seq <- seq(min(df$weekly_dose), max(df$weekly_dose), length.out = 1000)
+  pred_data <- data.frame(weekly_dose = dosis_seq)
+  preds <- predict(modelo, newdata = pred_data, interval = "confidence")
+  pred_curve <- cbind(pred_data, preds)
+  
+  opt_index <- which.min(pred_curve$fit)
+  dose_opt <- pred_curve$weekly_dose[opt_index]
+  y_opt <- pred_curve$fit[opt_index]
+  
+  g <- ggplot() +
+    geom_rect(aes(xmin = shade_min, xmax = shade_max, ymin = -Inf, ymax = Inf),
+              fill = "gray70", alpha = 0.2) +
+    geom_line(data = pred_curve, aes(x = weekly_dose, y = fit), size = 1) +
+    geom_line(data = pred_curve, aes(x = weekly_dose, y = lwr), linetype = "dashed") +
+    geom_line(data = pred_curve, aes(x = weekly_dose, y = upr), linetype = "dashed") +
+    geom_vline(xintercept = dose_opt, linetype = "dashed", color = "red", linewidth = 0.8) +
+    annotate("text", x = dose_opt, y = y_opt,
+             label = paste0("Optimal ≈ ", round(dose_opt, 0), " MET-min"),
+             vjust = -0.7, hjust = -0.05, color = "red", size = 4) +
+    annotate("text", x = (shade_min + shade_max)/2, y = max(pred_curve$fit),
+             label = "WHO PA recommendations", vjust = -0.5, size = 4) +
+    annotate("text", x = 0, y = min(pred_curve$lwr),
+             label = "Model fit:\nSpline (3 df)", hjust = 0, vjust = 0, fontface = "bold") +
+    labs(
+      title = paste("Dose-response by treatment:", unique(df$trt)),
+      x = "Dose of physical activity (METs-min/week)",
+      y = "Estimated effect (Δ systolic BP)"
+    ) +
+    theme_minimal()
+  
+  list(
+    tratamiento = unique(df$trt),
+    dosis_optima = round(dose_opt, 1),
+    efecto_optimo = round(y_opt, 2),
+    grafico = g
+  )
+})
+
+# Limpiar nulos
+grafico_dosis_trat <- compact(grafico_dosis_trat)
+
+# Mostrar tabla resumen
+map_dfr(grafico_dosis_trat, ~ tibble(
+  tratamiento = .x$tratamiento,
+  dosis_optima = .x$dosis_optima,
+  cambio_estimado = .x$efecto_optimo
+))
+
+# Ver un gráfico específico (por ejemplo, "Cycling")
+grafico_dosis_trat[["Cycling"]]$grafico
+
+# Mostrar todos los gráficos en pantalla
+#walk(grafico_dosis_trat, ~print(.x$grafico))
+
+
+```
+
+### DIASTOLIC DOSE
+
+####OV- Dose Response OVERALL
+
+```{r}
+if (!all(c("weekly_dose", "y") %in% names(dias.data))) {
+  stop("❌ La tabla `dias.data` no tiene las columnas necesarias: 'weekly_dose' y 'y'")
+}
+
+# Linear regression
+lin.plot.dias <- ggplot(dias.data, aes(x = weekly_dose, y = y)) +
+  geom_hline(yintercept = 0, col = "red") +
+  geom_point() +
+  geom_smooth(method = "lm", col = "blue") +
+  labs(
+    x = "Physical Activity Dose (METs-min/week)",
+    y = "Change from baseline (mmHg)",
+    title = "Linear regression method"
+  ) +
+  scale_y_continuous(breaks = seq(-20, 10, 5)) +
+  theme_minimal()
+
+# LOESS
+l.plot.dias <- ggplot(dias.data, aes(x = weekly_dose, y = y)) +
+  geom_hline(yintercept = 0, col = "red") +
+  geom_point() +
+  geom_smooth(method = "loess", col = "gold") +
+  labs(
+    x = "Physical Activity Dose (METs-min/week)",
+    y = "Change from baseline (mmHg)",
+    title = "LOESS method"
+  ) +
+  scale_y_continuous(breaks = seq(-20, 10, 5)) +
+  theme_minimal()
+
+# Natural spline (2 knots)
+n2.plot.dias <- ggplot(dias.data, aes(x = weekly_dose, y = y)) +
+  geom_hline(yintercept = 0, col = "red") +
+  geom_point() +
+  geom_smooth(method = "lm", formula = y ~ ns(x, 2), col = "red") +
+  labs(
+    x = "Physical Activity Dose (METs-min/week)",
+    y = "Change from baseline (mmHg)",
+    title = "Natural spline (2 knots)"
+  ) +
+  scale_y_continuous(breaks = seq(-20, 10, 5)) +
+  theme_minimal()
+
+# Natural spline (3 knots)
+n3.plot.dias <- ggplot(dias.data, aes(x = weekly_dose, y = y)) +
+  geom_hline(yintercept = 0, col = "red") +
+  geom_point() +
+  geom_smooth(method = "lm", formula = y ~ ns(x, 3), col = "black") +
+  labs(
+    x = "Physical Activity Dose (METs-min/week)",
+    y = "Change from baseline (mmHg)",
+    title = "Natural spline (3 knots)"
+  ) +
+  scale_y_continuous(breaks = seq(-20, 10, 5)) +
+  theme_minimal()
+
+# Exportar gráfico
+tiff("DOSE_Diastolic.tiff", height = 9, width = 10, units = "in", res = 300)
+
+grid.arrange(lin.plot.dias, l.plot.dias, n2.plot.dias, n3.plot.dias, nrow = 2)
+
+dev.off()
+
+```
+
+##### Estadistico - Dosis Diastolic blood pressure
+
+```{r}
+# 📦 Paquetes necesarios
+
+# 🔍 Modelo lineal simple
+lm_simple_dias <- lm(y ~ weekly_dose, data = dias.data)
+summary(lm_simple_dias)  # Revisa el valor-p del coeficiente de weekly_dose
+
+# 📈 Modelo con spline natural (2 grados de libertad)
+lm_spline2_dias <- lm(y ~ ns(weekly_dose, 2), data = dias.data)
+
+# 📊 Comparación de modelos: lineal vs spline 2
+anova(lm_simple_dias, lm_spline2_dias)
+
+# 📈 Modelo con spline más flexible (3 grados de libertad)
+lm_spline3_dias <- lm(y ~ ns(weekly_dose, 3), data = dias.data)
+
+# 📊 Comparación de modelos: lineal vs spline 3
+anova(lm_simple_dias, lm_spline3_dias)
+
+# ✅ Evaluación del modelo categórico
+# Clasificamos dosis en 4 grupos (ajustable)
+dias.data$dose_group <- cut(
+  dias.data$weekly_dose,
+  breaks = c(-Inf, 0, 500, 1000, Inf),
+  labels = c("Usual Care", "Low", "Medium", "High")
+)
+
+# Modelo categórico (ANOVA)
+lm_cat_dias <- aov(y ~ dose_group, data = dias.data)
+summary(lm_cat_dias)
+
+# Comparaciones múltiples entre grupos
+TukeyHSD(lm_cat_dias)
+
+```
+ la relación dosis-respuesta para presión diastólica es estadísticamente significativa en todos los enfoques: lineal, spline y categórico.
+ 
+En este caso, el modelo con spline(3 df) es el mejor para el modelo, porque:
+
+Mejora significativamente respecto al modelo lineal.
+
+Permite representar curvaturas complejas, necesarias para detectar una dosis mínima eficaz o dosis óptima.
+
+##### Dosis Óptima Diastolic blood pressure overall level
+
+```{r}
+
+library(ggplot2)
+library(splines)
+library(dplyr)
+
+# 📦 Preprocesamiento
+dias.data_valido <- dias.data %>%
+  filter(!is.na(y), !is.na(weekly_dose))
+
+# 🧠 Función robusta para ajustar el modelo spline
+ajustar_spline_seguro <- function(data) {
+  modelo <- lm(y ~ ns(weekly_dose, 3), data = data)
+  if (qr(model.matrix(modelo))$rank < ncol(model.matrix(modelo))) {
+    message("⚠️ Spline(3) no viable, usando spline(2)")
+    modelo <- lm(y ~ ns(weekly_dose, 2), data = data)
+  }
+  return(modelo)
+}
+
+# ⚙️ Ajustar el modelo
+lm_spline_dias <- ajustar_spline_seguro(dias.data_valido)
+
+# 🔮 Predicciones
+doses_dias <- seq(min(dias.data_valido$weekly_dose), 
+                  max(dias.data_valido$weekly_dose), 
+                  length.out = 1000)
+pred_df_dias <- data.frame(weekly_dose = doses_dias)
+pred_df_dias$predicted <- predict(lm_spline_dias, newdata = pred_df_dias)
+
+# 🎯 Dosis óptima
+optimal_index_dias <- which.min(pred_df_dias$predicted)
+optimal_dose_dias <- pred_df_dias$weekly_dose[optimal_index_dias]
+optimal_response_dias <- pred_df_dias$predicted[optimal_index_dias]
+
+# 📢 Resultados
+cat("📍 Dosis óptima estimada:", round(optimal_dose_dias, 1), "MET-min/semana\n")
+cat("🩺 Cambio estimado en presión diastólica:", round(optimal_response_dias, 2), "mmHg\n")
+
+# 📊 Gráfico final
+ggplot(dias.data_valido, aes(x = weekly_dose, y = y)) +
+  geom_point(alpha = 0.6) +
+  geom_line(data = pred_df_dias, aes(x = weekly_dose, y = predicted), color = "blue", size = 1) +
+  geom_vline(xintercept = optimal_dose_dias, linetype = "dashed", color = "red") +
+  annotate("text", x = optimal_dose_dias, y = min(pred_df_dias$predicted),
+           label = paste0("Dosis óptima:\n", round(optimal_dose_dias, 0), " MET-min/sem"),
+           hjust = -0.1, color = "red") +
+  labs(
+    x = "Dosis semanal (MET-min)",
+    y = "Cambio en presión diastólica (mmHg)",
+    title = "Curva dosis-respuesta con dosis óptima (modelo externo)"
+  ) +
+  theme_minimal()
+
+```
+Spline(3) no viable, usando spline(2)
+
+##### Dosis minima, maxima y optima diastolic blood pressure overall
+
+```{r}
+
+library(ggplot2)
+library(splines)
+library(dplyr)
+
+# ⚙️ Paso 1: Validar y limpiar datos
+dias.data_valido <- dias.data %>%
+  filter(!is.na(y), !is.na(weekly_dose))
+
+# ⚙️ Paso 2: Modelo spline robusto
+ajustar_spline_seguro <- function(data) {
+  modelo <- lm(y ~ ns(weekly_dose, 3), data = data)
+  if (qr(model.matrix(modelo))$rank < ncol(model.matrix(modelo))) {
+    message("⚠️ Modelo spline(3) rank-deficient, usando spline(2)")
+    modelo <- lm(y ~ ns(weekly_dose, 2), data = data)
+  }
+  return(modelo)
+}
+
+lm_spline <- ajustar_spline_seguro(dias.data_valido)
+
+# 📈 Paso 3: Curva predicha + IC
+doses <- seq(min(dias.data_valido$weekly_dose), max(dias.data_valido$weekly_dose), length.out = 1000)
+pred_data <- data.frame(weekly_dose = doses)
+preds <- predict(lm_spline, newdata = pred_data, interval = "confidence")
+pred_curve <- cbind(pred_data, preds)
+
+# 📍 Paso 4: Dosis óptima
+opt_index <- which.min(pred_curve$fit)
+dose_optimal <- pred_curve$weekly_dose[opt_index]
+y_optimal <- pred_curve$fit[opt_index]
+
+# 🟦 Paso 5: Zona OMS
+shade_min <- 600
+shade_max <- 1200
+
+# 🖼️ Paso 6: Graficar con robustez
+tiff("Curva_Dosis_Con_Optima_Diastolica.tiff", width = 9, height = 6, units = "in", res = 300)
+
+
+# Si no lo has hecho antes, define el rango del eje Y si lo necesitas
+y_min <- min(pred_curve$lwr)
+y_max <- max(pred_curve$upr)
+
+ggplot() +
+  # Área sombreada de recomendaciones de la OMS
+  geom_rect(
+    aes(xmin = shade_min, xmax = shade_max, ymin = -Inf, ymax = Inf),
+    fill = "gray70", alpha = 0.2
+  ) +
+
+  # Curva de predicción en negro
+  geom_line(
+    data = pred_curve,
+    aes(x = weekly_dose, y = fit),
+    color = "black", size = 1
+  ) +
+  
+  # Intervalos de confianza (líneas punteadas)
+  geom_line(
+    data = pred_curve,
+    aes(x = weekly_dose, y = lwr),
+    linetype = "dashed", color = "black"
+  ) +
+  geom_line(
+    data = pred_curve,
+    aes(x = weekly_dose, y = upr),
+    linetype = "dashed", color = "black"
+  ) +
+
+  # Línea roja corta centrada en el punto óptimo
+  geom_segment(
+    aes(
+      x = dose_optimal, xend = dose_optimal,
+      y = y_optimal - 0.0,
+      yend = y_optimal + 3.7
+    ),
+    color = "red", linewidth = 0.8
+  ) +
+
+  # Punto rojo en la dosis óptima
+  geom_point(
+    aes(x = dose_optimal, y = y_optimal),
+    color = "red", size = 3
+  ) +
+
+  # Texto vertical cerca del punto rojo
+  annotate(
+    "text",
+    x = dose_optimal + 15,
+    y = y_optimal + 1.9,
+    label = paste0("MCID at ", round(dose_optimal), " METs-min/week"),
+    angle = 90, hjust = 0.3, vjust = 0.9,
+    color = "red", size = 3.4
+  ) +
+
+  # Texto centrado en el área gris
+  annotate(
+    "text",
+    x = (shade_min + shade_max) / 2,
+    y = max(pred_curve$fit) + 1.7,
+    label = "WHO PA recommendations",
+    size = 4.5
+  ) +
+  
+  # Ejes
+  labs(
+    x = "Physical activity dose (METs-min/week)",
+    y = "Estimated change in diastolic blood pressure (Δ mmHg)"
+  ) +
+
+  # Tema y tipografía
+  theme_minimal() +
+  theme(
+    text = element_text(family = "Arial"),
+    plot.title = element_text(size = 14, face = "bold")
+  )
+
+
+```
+
+
+####AG-Dose Response Agent level
+
+##### Estadistico - Dosis Systolic blood pressure
+
+```{r}
+
+# Filtrar agentes válidos (excluye Usual care y Flexibility)
+dias.data_agentes <- dias.data %>%
+  filter(!trt.2 %in% c("Usual care", "Flexibility"))
+
+# Separar por agente
+agente_split_dias <- split(dias.data_agentes, dias.data_agentes$trt.2)
+
+# Loop por agente para mostrar resultados detallados
+for (nombre_agente in names(agente_split_dias)) {
+  
+  datos <- agente_split_dias[[nombre_agente]]
+  
+  if (nrow(datos) < 5 || length(unique(datos$weekly_dose)) < 4) {
+    cat("\n⛔ Agente:", nombre_agente, "- Insuficiente variación o tamaño muestral\n")
+    next
+  }
+  
+  cat("\n\n======================================")
+  cat("\n📊 Análisis de agente:", nombre_agente)
+  cat("\n======================================\n")
+  
+  # 📌 Modelo lineal simple
+  modelo_lin <- lm(y ~ weekly_dose, data = datos)
+  cat("\n🔹 Modelo Lineal:\n")
+  print(summary(modelo_lin))
+  
+  # 📈 Comparación con spline (2 df)
+  modelo_ns2 <- lm(y ~ ns(weekly_dose, 2), data = datos)
+  cat("\n🔸 ANOVA: Lineal vs Spline (2 df):\n")
+  print(anova(modelo_lin, modelo_ns2))
+  
+  # 📈 Comparación con spline (3 df)
+  modelo_ns3 <- lm(y ~ ns(weekly_dose, 3), data = datos)
+  cat("\n🔸 ANOVA: Lineal vs Spline (3 df):\n")
+  print(anova(modelo_lin, modelo_ns3))
+  
+  # ✅ Clasificación por grupos de dosis
+  datos$dose_group <- cut(
+    datos$weekly_dose,
+    breaks = c(-Inf, 0, 500, 1000, Inf),
+    labels = c("Usual Care", "Low", "Medium", "High")
+  )
+  
+  # ⚠️ Validación de número de grupos
+  if (length(unique(na.omit(datos$dose_group))) < 2) {
+    cat("\n⚠️ No se puede realizar ANOVA categórica (grupos insuficientes)\n")
+    next
+  }
+  
+  # 📊 ANOVA categórico
+  modelo_cat <- aov(y ~ dose_group, data = datos)
+  cat("\n✅ ANOVA por grupo de dosis (categorías):\n")
+  print(summary(modelo_cat))
+  
+  # 🧪 Comparaciones múltiples
+  cat("\n🔍 Comparaciones múltiples (Tukey HSD):\n")
+  print(TukeyHSD(modelo_cat))
+}
+
+```
+Ningún agente muestra una relación estadísticamente significativa entre la dosis de ejercicio y el cambio en presión diastólica, al igual que sucedia con la sistolica.
+
+###### Dosis Óptima Systolic blood pressure agent level
+
+Se deja aqui pero al no salir nada significativo en los estadisticos, no merece la pena calcular unos datos y presentarlos. Igualmente dejamos el código para adaptarlo a otros metaánalisis
+
+```{r}
+
+# Filtrar solo agentes activos en diastólica
+dias.data_agente <- dias.data %>%
+  filter(!trt.2 %in% c("Usual care", "Flexibility"))
+
+# Dividir por agente
+split_agente_dias <- split(dias.data_agente, dias.data_agente$trt.2)
+
+# Calcular curva y dosis óptima por agente
+optima_agente_dias <- map(split_agente_dias, function(datos) {
+  
+  if (nrow(datos) < 5 || length(unique(datos$weekly_dose)) < 4) return(NULL)
+  
+  modelo <- lm(y ~ ns(weekly_dose, 3), data = datos)
+  
+  dosis_seq <- seq(min(datos$weekly_dose), max(datos$weekly_dose), length.out = 1000)
+  predicciones <- predict(modelo, newdata = data.frame(weekly_dose = dosis_seq))
+  
+  opt_index <- which.min(predicciones)
+  opt_dose <- dosis_seq[opt_index]
+  opt_resp <- predicciones[opt_index]
+  
+  grafico <- ggplot(datos, aes(x = weekly_dose, y = y)) +
+    geom_point(alpha = 0.5) +
+    stat_smooth(method = "lm", formula = y ~ ns(x, 3), col = "blue", se = FALSE) +
+    geom_vline(xintercept = opt_dose, linetype = "dashed", color = "red") +
+    annotate("text", x = opt_dose, y = min(predicciones),
+             label = paste0(round(opt_dose, 0), " MET-min/sem"),
+             hjust = -0.1, color = "red") +
+    labs(title = paste("Dosis óptima -", unique(datos$trt.2)),
+         x = "Dosis semanal (MET-min)", y = "Cambio en presión diastólica (mmHg)") +
+    theme_minimal()
+  
+  list(
+    agente = unique(datos$trt.2),
+    dosis_optima = round(opt_dose, 1),
+    cambio_estimado = round(opt_resp, 2),
+    grafico = grafico
+  )
+})
+
+# Filtrar solo los que tienen resultados válidos
+optima_agente_dias <- compact(optima_agente_dias)
+
+# Mostrar tabla resumen
+map_dfr(optima_agente_dias, ~tibble(
+  agente = .x$agente,
+  dosis_optima = .x$dosis_optima,
+  cambio_estimado = .x$cambio_estimado
+))
+
+optima_agente_dias[["Aerobic"]]$grafico
+
+walk(optima_agente_dias, ~print(.x$grafico))
+
+
+```
+
+###### Dosis minima, maxima y optima Systolic blood pressure
+
+Se deja aqui pero al no salir nada significativo en los estadisticos, no merece la pena calcular unos datos y presentarlos. Igualmente dejamos el código para adaptarlo a otros metaánalisis
+
+```{r}
+
+# Zona recomendada por la OMS
+shade_min <- 600
+shade_max <- 1200
+
+# Filtrar agentes activos en diastólica
+dias.data_agente <- dias.data %>%
+  filter(!trt.2 %in% c("Usual care", "Flexibility"))
+
+# Separar por agente
+split_agente_dias <- split(dias.data_agente, dias.data_agente$trt.2)
+
+# Función para curva dosis-respuesta con zona OMS y dosis óptima
+grafico_dosis_agente_dias <- map(split_agente_dias, function(df) {
+  
+  if (nrow(df) < 5 || length(unique(df$weekly_dose)) < 4) return(NULL)
+  
+  modelo <- lm(y ~ ns(weekly_dose, 3), data = df)
+  
+  dosis_seq <- seq(min(df$weekly_dose), max(df$weekly_dose), length.out = 1000)
+  pred_data <- data.frame(weekly_dose = dosis_seq)
+  preds <- predict(modelo, newdata = pred_data, interval = "confidence")
+  pred_curve <- cbind(pred_data, preds)
+  
+  opt_index <- which.min(pred_curve$fit)
+  dose_opt <- pred_curve$weekly_dose[opt_index]
+  y_opt <- pred_curve$fit[opt_index]
+  
+  g <- ggplot() +
+    geom_rect(aes(xmin = shade_min, xmax = shade_max, ymin = -Inf, ymax = Inf),
+              fill = "gray70", alpha = 0.2) +
+    geom_line(data = pred_curve, aes(x = weekly_dose, y = fit), size = 1) +
+    geom_line(data = pred_curve, aes(x = weekly_dose, y = lwr), linetype = "dashed") +
+    geom_line(data = pred_curve, aes(x = weekly_dose, y = upr), linetype = "dashed") +
+    geom_vline(xintercept = dose_opt, linetype = "dashed", color = "red", linewidth = 0.8) +
+    annotate("text", x = dose_opt, y = y_opt,
+             label = paste0("Optimal ≈ ", round(dose_opt, 0), " MET-min"),
+             vjust = -0.7, hjust = -0.05, color = "red", size = 4) +
+    annotate("text", x = (shade_min + shade_max)/2, y = max(pred_curve$fit),
+             label = "WHO PA recommendations", vjust = -0.5, size = 4) +
+    annotate("text", x = 0, y = min(pred_curve$lwr),
+             label = "Model fit:\nSpline (3 df)", hjust = 0, vjust = 0, fontface = "bold") +
+    labs(
+      title = paste("Dose-response by agent:", unique(df$trt.2)),
+      x = "Dose of physical activity (METs-min/week)",
+      y = "Estimated effect (Δ diastolic BP)"
+    ) +
+    theme_minimal()
+  
+  list(
+    agente = unique(df$trt.2),
+    dosis_optima = round(dose_opt, 1),
+    efecto_optimo = round(y_opt, 2),
+    grafico = g
+  )
+})
+
+# Limpiar los resultados vacíos
+grafico_dosis_agente_dias <- compact(grafico_dosis_agente_dias)
+
+# Tabla resumen de dosis óptima y efecto estimado
+map_dfr(grafico_dosis_agente_dias, ~ tibble(
+  agente = .x$agente,
+  dosis_optima = .x$dosis_optima,
+  cambio_estimado = .x$efecto_optimo
+))
+
+grafico_dosis_agente_dias[["Aerobic"]]$grafico
+
+walk(grafico_dosis_agente_dias, ~print(.x$grafico))
+
+```
+
+####TRT- Dose Response Treatment level
+
+##### Estadistico - Dosis Systolic blood pressure
+
+```{r}
+
+# Filtrar tratamientos válidos (excluyendo Usual care y Flexibility)
+dias.data_validos <- dias.data %>%
+  filter(!trt %in% c("Usual care", "Flexibility"))
+
+# Agrupar por tratamiento
+tratamiento_split_dias <- split(dias.data_validos, dias.data_validos$trt)
+
+# Loop por tratamiento
+for (nombre_trt in names(tratamiento_split_dias)) {
+  
+  datos <- tratamiento_split_dias[[nombre_trt]]
+  
+  if (nrow(datos) < 5 || length(unique(datos$weekly_dose)) < 4) {
+    cat("\n⛔ Tratamiento:", nombre_trt, "- Insuficiente variación o tamaño muestral\n")
+    next
+  }
+  
+  cat("\n\n===========================================")
+  cat("\n📊 Análisis del tratamiento:", nombre_trt)
+  cat("\n===========================================\n")
+  
+  # 📌 Modelo lineal simple
+  modelo_lin <- lm(y ~ weekly_dose, data = datos)
+  cat("\n🔹 Modelo Lineal:\n")
+  print(summary(modelo_lin))
+  
+  # 📈 Comparación con spline (2 df)
+  modelo_ns2 <- lm(y ~ ns(weekly_dose, 2), data = datos)
+  cat("\n🔸 ANOVA: Lineal vs Spline (2 df):\n")
+  print(anova(modelo_lin, modelo_ns2))
+  
+  # 📈 Comparación con spline (3 df)
+  modelo_ns3 <- lm(y ~ ns(weekly_dose, 3), data = datos)
+  cat("\n🔸 ANOVA: Lineal vs Spline (3 df):\n")
+  print(anova(modelo_lin, modelo_ns3))
+  
+  # ✅ Clasificación por grupos de dosis
+  datos$dose_group <- cut(
+    datos$weekly_dose,
+    breaks = c(-Inf, 0, 500, 1000, Inf),
+    labels = c("Usual Care", "Low", "Medium", "High")
+  )
+  
+  # ⚠️ Verificar que haya al menos 2 grupos para ANOVA
+  if (length(unique(na.omit(datos$dose_group))) < 2) {
+    cat("\n⚠️ No se puede realizar ANOVA categórica (grupos insuficientes)\n")
+    next
+  }
+  
+  # 📊 ANOVA categórico
+  modelo_cat <- aov(y ~ dose_group, data = datos)
+  cat("\n✅ ANOVA por grupo de dosis (categorías):\n")
+  print(summary(modelo_cat))
+  
+  # 🧪 Comparaciones múltiples
+  cat("\n🔍 Comparaciones múltiples (Tukey HSD):\n")
+  print(TukeyHSD(modelo_cat))
+}
+
+```
+
+Ningún tratamiento muestra una asociación significativa entre dosis semanal y cambio en presión diastólica, en ninguno de los modelos evaluados.
+
+##### Dosis Óptima Systolic blood pressure agent level
+
+```{r}
+
+# Filtrar tratamientos activos (excluyendo Usual care y Flexibility)
+dias.data_trt <- dias.data %>%
+  filter(!trt %in% c("Usual care", "Flexibility"))
+
+# Dividir por tratamiento
+split_trt_dias <- split(dias.data_trt, dias.data_trt$trt)
+
+# Función para calcular dosis óptima y graficar por tratamiento
+optima_tratamiento_dias <- map(split_trt_dias, function(datos) {
+  
+  if (nrow(datos) < 5 || length(unique(datos$weekly_dose)) < 4) return(NULL)
+  
+  modelo <- lm(y ~ ns(weekly_dose, 3), data = datos)
+  
+  dosis_seq <- seq(min(datos$weekly_dose), max(datos$weekly_dose), length.out = 1000)
+  predicciones <- predict(modelo, newdata = data.frame(weekly_dose = dosis_seq))
+  
+  opt_index <- which.min(predicciones)
+  opt_dose <- dosis_seq[opt_index]
+  opt_resp <- predicciones[opt_index]
+  
+  grafico <- ggplot(datos, aes(x = weekly_dose, y = y)) +
+    geom_point(alpha = 0.5) +
+    stat_smooth(method = "lm", formula = y ~ ns(x, 3), col = "blue", se = FALSE) +
+    geom_vline(xintercept = opt_dose, linetype = "dashed", color = "red") +
+    annotate("text", x = opt_dose, y = min(predicciones),
+             label = paste0(round(opt_dose, 0), " MET-min/sem"),
+             hjust = -0.1, color = "red") +
+    labs(title = paste("Dosis óptima -", unique(datos$trt)),
+         x = "Dosis semanal (MET-min)", y = "Cambio en presión diastólica (mmHg)") +
+    theme_minimal()
+  
+  list(
+    tratamiento = unique(datos$trt),
+    dosis_optima = round(opt_dose, 1),
+    cambio_estimado = round(opt_resp, 2),
+    grafico = grafico
+  )
+})
+
+# Limpiar resultados nulos
+optima_tratamiento_dias <- compact(optima_tratamiento_dias)
+
+# Mostrar resumen tabular
+map_dfr(optima_tratamiento_dias, ~tibble(
+  tratamiento = .x$tratamiento,
+  dosis_optima = .x$dosis_optima,
+  cambio_estimado = .x$cambio_estimado
+))
+
+optima_tratamiento_dias[["HIIT"]]$grafico
+
+walk(optima_tratamiento_dias, ~print(.x$grafico))
+
+```
+
+###### Dosis minima, maxima y optima Systolic blood pressure
+
+Ningún tratamiento muestra una asociación significativa entre dosis semanal y cambio en presión diastólica, en ninguno de los modelos evaluados.
+
+```{r}
+
+# Zona recomendada por la OMS
+shade_min <- 600
+shade_max <- 1200
+
+# Filtrar tratamientos válidos
+dias.data_trt <- dias.data %>%
+  filter(!trt %in% c("Usual care", "Flexibility"))
+
+# Dividir por tratamiento
+split_trt_dias <- split(dias.data_trt, dias.data_trt$trt)
+
+# Función para generar gráfico con curva spline, IC y zona OMS
+grafico_dosis_trt_dias <- map(split_trt_dias, function(df) {
+  
+  if (nrow(df) < 5 || length(unique(df$weekly_dose)) < 4) return(NULL)
+  
+  modelo <- lm(y ~ ns(weekly_dose, 3), data = df)
+  
+  dosis_seq <- seq(min(df$weekly_dose), max(df$weekly_dose), length.out = 1000)
+  pred_data <- data.frame(weekly_dose = dosis_seq)
+  preds <- predict(modelo, newdata = pred_data, interval = "confidence")
+  pred_curve <- cbind(pred_data, preds)
+  
+  opt_index <- which.min(pred_curve$fit)
+  dose_opt <- pred_curve$weekly_dose[opt_index]
+  y_opt <- pred_curve$fit[opt_index]
+  
+  g <- ggplot() +
+    geom_rect(aes(xmin = shade_min, xmax = shade_max, ymin = -Inf, ymax = Inf),
+              fill = "gray70", alpha = 0.2) +
+    geom_line(data = pred_curve, aes(x = weekly_dose, y = fit), size = 1) +
+    geom_line(data = pred_curve, aes(x = weekly_dose, y = lwr), linetype = "dashed") +
+    geom_line(data = pred_curve, aes(x = weekly_dose, y = upr), linetype = "dashed") +
+    geom_vline(xintercept = dose_opt, linetype = "dashed", color = "red", linewidth = 0.8) +
+    annotate("text", x = dose_opt, y = y_opt,
+             label = paste0("Optimal ≈ ", round(dose_opt, 0), " MET-min"),
+             vjust = -0.7, hjust = -0.05, color = "red", size = 4) +
+    annotate("text", x = (shade_min + shade_max)/2, y = max(pred_curve$fit),
+             label = "WHO PA recommendations", vjust = -0.5, size = 4) +
+    annotate("text", x = 0, y = min(pred_curve$lwr),
+             label = "Model fit:\nSpline (3 df)", hjust = 0, vjust = 0, fontface = "bold") +
+    labs(
+      title = paste("Dose-response by treatment:", unique(df$trt)),
+      x = "Dose of physical activity (METs-min/week)",
+      y = "Estimated effect (Δ diastolic BP)"
+    ) +
+    theme_minimal()
+  
+  list(
+    tratamiento = unique(df$trt),
+    dosis_optima = round(dose_opt, 1),
+    efecto_optimo = round(y_opt, 2),
+    grafico = g
+  )
+})
+
+# Limpiar resultados nulos
+grafico_dosis_trt_dias <- compact(grafico_dosis_trt_dias)
+
+# Mostrar tabla resumen
+map_dfr(grafico_dosis_trt_dias, ~ tibble(
+  tratamiento = .x$tratamiento,
+  dosis_optima = .x$dosis_optima,
+  cambio_estimado = .x$efecto_optimo
+))
+
+grafico_dosis_trt_dias[["HIIT"]]$grafico
+
+walk(grafico_dosis_trt_dias, ~print(.x$grafico))
+```
+
+### Rank probabilities
+
+#####agent level_systolic
+
+Cumulative rank probabilities were also computed.
+
+```{r, collapse=TRUE, fig.height=10, fig.width=15}
+# cumulative rank probs
+(rank_probs_sys_agent <- posterior_rank_probs(fit_FE_reg_agent_sys, lower_better = TRUE, newdata = tibble(premean = c(125, 135, 145)),
+                         study = paste(premean, "mmHg"),
+                         cumulative = TRUE))
+
+# plot
+tiff("probs_sys_agent.tiff", height = 9, width = 14, units = "in", res = 300)
+plot(rank_probs_sys_agent)
+dev.off()
+```
+
+#####agent level_diastolic
+
+Cumulative rank probabilities were also computed.
+
+```{r, collapse=TRUE, fig.height=10, fig.width=15}
+# cumulative rank probs
+(rank_probs_dias_agent <- posterior_rank_probs(fit_FE_reg_agent_dias, lower_better = TRUE, newdata = tibble(premean = c(75, 85, 90)),
+                         study = paste(premean, "mmHg"),
+                         cumulative = TRUE))
+
+# plot
+tiff("probs_dias_agent.tiff", height = 9, width = 14, units = "in", res = 300)
+plot(rank_probs_dias_agent)
+dev.off()
+```
+
+#####treatment level_systolic
+
+Cumulative rank probabilities were also computed.
+
+```{r, collapse=TRUE, fig.height=10, fig.width=15}
+# cumulative rank probs
+(rank_probs_sys_trt <- posterior_rank_probs(fit_FE_reg_trt_sys, lower_better = TRUE, newdata = tibble(premean = c(125, 135, 145)),
+                         study = paste(premean, "mmHg"),
+                         cumulative = TRUE))
+
+# plot
+tiff("probs_sys_trt.tiff", height = 9, width = 14, units = "in", res = 300)
+plot(rank_probs_sys_trt)
+dev.off()
+```
+
+#####treatment level_diastolic
+
+Cumulative rank probabilities were also computed.
+
+```{r, collapse=TRUE, fig.height=10, fig.width=15}
+# cumulative rank probs
+(rank_probs_dias_trt <- posterior_rank_probs(fit_FE_reg_trt_dias, lower_better = TRUE, newdata = tibble(premean = c(75, 85, 90)),
+                         study = paste(premean, "mmHg"),
+                         cumulative = TRUE))
+
+# plot
+tiff("probs_dias_trt.tiff", height = 9, width = 14, units = "in", res = 300)
+plot(rank_probs_dias_trt)
+dev.off()
+```
+
+### Posterior predictive distributions for potential harmful effects
+
+The predictive probability of a new trial showing a harmful effect is:
+
+This model is assuming that there are no differences in risk between different baseline SBP. No se ha calculado
+
+```{r, echo=FALSE}
+# predictive distribution
+rel_pred <- relative_effects(fit_FE, predictive_distribution = TRUE)
+```
+
+```{r}
+colMeans(as.matrix(rel_pred) > 0)
+```
+
+In the presence of heterogeneity, it has been argued that decision makers should consider the predictive distribution of relative effects in a new study, insted of the posterior distribution of the mean treatment effects, as this reflects uncertainty due to the heterogeneity and may better represent uncertainty about a future roll-out of a treatment. In the unadjusted analysis, whilst there is evidence that some of the modalities are effective on average, and essentially, zero probability of harm based on the mean effect, the predictive distribution for effectiveness in a new study is wide and covers a range of harmful effects.
+
+######Agent level_systolic
+
+For the analysis adjusting for baseline SBP, the predictive distribution of relative effects now depends on baseline SBP; here we calculate these in increments of 5 $mmHg$ from the normal value of SBP (120 $mmHg$).
+
+```{r}
+rel_effect_pred_sys_agent <- relative_effects(fit_FE_reg_agent_sys,
+                                newdata = tibble::tibble(premean = c(125, 135, 145)),
+                                study = premean,
+                                predictive_distribution = TRUE)
+```
+
+The predicted probabilities of a new trial carried out in participants with different baseline SBP showing a harmful effect can be calculated as:
+
+```{r}
+colMeans(as.matrix(rel_effect_pred_sys_agent) > 0)
+```
+
+######Agent level_diastolic
+
+```{r}
+rel_effect_pred_dias_agent <- relative_effects(fit_FE_reg_agent_dias,
+                                newdata = tibble::tibble(premean = c(75, 85, 90)),
+                                study = premean,
+                                predictive_distribution = TRUE)
+```
+
+The predicted probabilities of a new trial carried out in participants with different baseline SBP showing a harmful effect can be calculated as:
+
+```{r}
+colMeans(as.matrix(rel_effect_pred_dias_agent) > 0)
+```
+
+To introduce an intervention in a specific health context, it is important to predict if no or adverse effects could appear in future trials. We can observe that **aerobic** interventions had associated a quite low probability o showing no or adverse effects for any baseline SBP level. In addition, **mind-body** activities also presented a low probability of adverse effects for people with hypertension in stages 1 or 2.
+
+######Treatment level_systolic
+
+For the analysis adjusting for baseline SBP, the predictive distribution of relative effects now depends on baseline SBP; here we calculate these in increments of 5 $mmHg$ from the normal value of SBP (120 $mmHg$).
+
+```{r}
+rel_effect_pred_sys_trt <- relative_effects(fit_FE_reg_trt_sys,
+                                newdata = tibble::tibble(premean = c(125, 135, 145)),
+                                study = premean,
+                                predictive_distribution = TRUE)
+```
+
+The predicted probabilities of a new trial carried out in participants with different baseline SBP showing a harmful effect can be calculated as:
+
+```{r}
+colMeans(as.matrix(rel_effect_pred_sys_trt) > 0)
+```
+
+######Treatment level_diastolic
+
+```{r}
+rel_effect_pred_dias_trt <- relative_effects(fit_FE_reg_trt_dias,
+                                newdata = tibble::tibble(premean = c(75, 85, 90)),
+                                study = premean,
+                                predictive_distribution = TRUE)
+```
+
+The predicted probabilities of a new trial carried out in participants with different baseline SBP showing a harmful effect can be calculated as:
+
+```{r}
+colMeans(as.matrix(rel_effect_pred_dias_trt) > 0)
+```
+
+So, for example, the predictive probability that a new trial applying a HIIT carried out in people leaving with T2DM with a baseline SBP of 150 $mmHg$ shows a harmful effect is around 3.43%, whereas applying a running intervention in the same population showing a harmful effect is around 22%. Furthermore, we should take into account that for extreme baseline SBP values, there are not so much information, which could lead to under or over-estimation of harmful effects.
+
+### SENSITIVITY analysis filtering by low risk of bias studies
+
+```{r}
+# studies at low risk of bias
+sys.data.rob <- sys.data %>%
+  filter(!studyID %in% c("Bellavere, 2018",
+                        "Bonfante, 2022",
+                        "Davoodi, 2022",
+                        "Dunstan, 1998",
+                        "Mendes, 2017",
+                        "Nair, 2022",
+                        "Sokolovska, 2020",
+                        "Tan, 2012",
+                        "Wormgoor, 2018"))
+```
+
+```{r}
+# studies at low risk of bias
+dias.data.rob <- dias.data %>%
+  filter(!studyID %in% c("Bellavere, 2018",
+                        "Bonfante, 2022",
+                        "Davoodi, 2022",
+                        "Dunstan, 1998",
+                        "Mendes, 2017",
+                        "Nair, 2022",
+                        "Sokolovska, 2020",
+                        "Tan, 2012",
+                        "Wormgoor, 2018"))
+```
